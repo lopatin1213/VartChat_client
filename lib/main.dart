@@ -8,6 +8,7 @@ import 'models/message.dart';
 import 'models/chat.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'services/fcm_service.dart';
+import 'dart:io';
 
 void main() {
   // В release все print() внутри зоны гасятся (в т.ч. утечки ключей/hex).
@@ -28,10 +29,18 @@ Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await FcmService.init();
+  if (Platform.isLinux) {
+    final home = Platform.environment['HOME'] ?? '.';
+    final configDir = Directory('$home/.config/VartChat');
+    await configDir.create(recursive: true);
+    Hive.init(configDir.path);
+  } else {
+    await Hive.initFlutter();
+  }
 
   await initializeDateFormatting('ru', null);
   await initializeDateFormatting('en', null);
-  await Hive.initFlutter();
+
   Hive.registerAdapter(ChatMessageAdapter());
   Hive.registerAdapter(ChatAdapter());
 

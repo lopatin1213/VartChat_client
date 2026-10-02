@@ -37,7 +37,7 @@ android {
             }
 
             // Загружаем свойства из keystore.properties (находится в корне проекта)
-            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            val keystorePropertiesFile = rootProject.file("key.properties")
             val keystoreProperties = Properties()
             if (keystorePropertiesFile.exists()) {
                 keystoreProperties.load(FileInputStream(keystorePropertiesFile))
@@ -54,7 +54,7 @@ android {
 
                         // Проверяем, что ни одно свойство не null и не пусто
                         if (alias.isNullOrBlank() || keyPwd.isNullOrBlank() || storePwd.isNullOrBlank() || storePath.isNullOrBlank()) {
-                            throw GradleException("keystore.properties: одно из свойств (keyAlias, keyPassword, storePassword, storeFile) отсутствует или пусто.")
+                            throw GradleException("key.properties: одно из свойств (keyAlias, keyPassword, storePassword, storeFile) отсутствует или пусто.")
                         }
 
                         // Присваиваем (теперь типы совпадают)
@@ -64,7 +64,7 @@ android {
                         storeFile = file(storePath)
                     } else {
                         // Если файла нет — используем debug-ключ (только для тестов, не для релиза)
-                        logger.warn("keystore.properties не найден! Используется отладочная подпись для release-сборки (не для публикации).")
+                        logger.warn("key.properties не найден! Используется отладочная подпись для release-сборки (не для публикации).")
                         keyAlias = "vartchat"
                         keyPassword = "123456"
                         storePassword = "123456"

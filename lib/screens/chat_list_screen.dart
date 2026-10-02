@@ -1441,18 +1441,29 @@ class _ChatListScreenState extends State<ChatListScreen>
             appBar: AppBar(
               title: Text('VartChat — ${widget.username}'),
             ),
-            floatingActionButton: FloatingActionButton(
-              onPressed: _showEditMenu,
-              tooltip: 'Управление',
-              child: const Icon(Icons.edit),
-            ),
             drawer: _buildDrawer(),
             body: Column(
               children: [
                 Expanded(
                   child: Row(
                     children: [
-                      SizedBox(width: 280, child: _buildCurrentList()),
+                      SizedBox(
+                        width: 280,
+                        child: Stack(
+                          children: [
+                            _buildCurrentList(),
+                            Positioned(
+                              right: 16,
+                              bottom: 16,
+                              child: FloatingActionButton(
+                                onPressed: _showEditMenu,
+                                tooltip: 'Управление',
+                                child: const Icon(Icons.edit),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                       const VerticalDivider(width: 1),
                       Expanded(
                         child: _selectedChat != null
@@ -1467,7 +1478,6 @@ class _ChatListScreenState extends State<ChatListScreen>
             ),
           );
         }
-
         final width = constraints.maxWidth;
         return PopScope(
           canPop: _selectedChat == null,

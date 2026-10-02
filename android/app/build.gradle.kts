@@ -13,7 +13,7 @@ import java.io.FileInputStream
 
 android {
             namespace = "com.vartrusdata.vartchat.vartchat"
-            compileSdk = flutter.compileSdkVersion
+            compileSdk = 37
 
             compileOptions {
                 sourceCompatibility = JavaVersion.VERSION_11
@@ -31,7 +31,7 @@ android {
             defaultConfig {
                 applicationId = "com.vartrusdata.vartchat.vartchat"
                 minSdk = flutter.minSdkVersion
-                targetSdk = flutter.targetSdkVersion
+                targetSdk = 37
                 versionCode = flutter.versionCode
                 versionName = flutter.versionName
             }

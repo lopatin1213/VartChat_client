@@ -118,8 +118,6 @@ class ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _installErrorHandler();
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final fn = widget.focusNode;

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "209021739249",
+    "project_id": "vartchat-2b256",
+    "storage_bucket": "vartchat-2b256.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:209021739249:android:c114455ab6f1f6b2bb8950",
+        "android_client_info": {
+          "package_name": "com.vartrusdata.vartchat.vartchat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCA2wbbF6JGkKA-MmY-NbMATW8CxwE-T7I"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

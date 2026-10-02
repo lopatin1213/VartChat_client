@@ -34,8 +34,14 @@ Future<void> _bootstrap() async {
     final configDir = Directory('$home/.config/VartChat');
     await configDir.create(recursive: true);
     Hive.init(configDir.path);
+  } else if (Platform.isWindows){
+    final home = Platform.environment['LOCALAPPDATA'] ?? '.';
+    final configDir = Directory('$home/VartChat');
+    await configDir.create(recursive: true);
+    Hive.init(configDir.path);
+
   } else {
-    await Hive.initFlutter();
+    Hive.initFlutter();
   }
 
   await initializeDateFormatting('ru', null);
@@ -47,7 +53,7 @@ Future<void> _bootstrap() async {
   // Сбрасываем Hive-бокс messages при апгрейде схемы (String id → int id).
   final prefs = await SharedPreferences.getInstance();
   const schemaKey = 'messages_schema_version';
-  const currentSchema = 2;
+  const currentSchema = 3;
   if ((prefs.getInt(schemaKey) ?? 1) < currentSchema) {
     await Hive.deleteBoxFromDisk('messages');
     await prefs.setInt(schemaKey, currentSchema);

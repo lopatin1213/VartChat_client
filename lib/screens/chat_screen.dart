@@ -7,6 +7,19 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/websocket_service.dart';
 
+/// Тип сообщения в списке. replyToId = 0 → не ответ.
+typedef ChatMsg = ({
+int id,
+String sender,
+String text,
+bool isMe,
+int timestamp,
+int replyToId,
+});
+
+/// Данные цитаты (для превью над полем ввода и внутри bubble).
+typedef ReplyPreview = ({String sender, String text, bool isMe});
+
 enum ChannelRole { creator, subscriber, guest }
 
 class ChatScreen extends StatefulWidget {
@@ -14,17 +27,13 @@ class ChatScreen extends StatefulWidget {
   final String chatName;
   final String username;
 
-  final List<({int id, String sender, String text, bool isMe, int timestamp})> messages;
+  final List<ChatMsg> messages;
 
   final void Function(String text) onSendMessage;
   final void Function(int msgId)? onDeleteMessage;
   final void Function(int msgId)? onHideForMe;
   final String Function(String username)? resolveDisplayName;
 
-  /// Внешний ScrollController (принадлежит ChatListScreen). Пока ChatScreen
-  /// смонтирован — контроллер держит позицию. При закрытии чата ChatScreen
-  /// unmount, ListView отвязывает позицию, но контроллер остаётся в Map у
-  /// ChatListScreen и переиспользуется при следующем открытии (с нуля).
   final ScrollController? scrollController;
 
   final VoidCallback? onBack;
@@ -38,6 +47,19 @@ class ChatScreen extends StatefulWidget {
   final VoidCallback? onSubscribe;
   final TextEditingController controller;
   final FocusNode? focusNode;
+
+  /// Активный reply: если != null, над полем ввода показывается превью.
+  final ReplyPreview? activeReply;
+
+  /// Установить reply на сообщение [msgId] (свайп вправо / пункт меню).
+  final void Function(int msgId)? onSetReply;
+
+  /// Отменить активный reply.
+  final VoidCallback? onCancelReply;
+
+  /// Получить данные цитаты по msgId для отрисовки внутри bubble.
+  /// Возвращает null, если цитата ещё не загружена.
+  final ReplyPreview? Function(int replyToId)? resolveReply;
 
   const ChatScreen({
     super.key,
@@ -59,6 +81,10 @@ class ChatScreen extends StatefulWidget {
     this.lastSeen,
     this.channelRole,
     this.onSubscribe,
+    this.activeReply,
+    this.onSetReply,
+    this.onCancelReply,
+    this.resolveReply,
   });
 
   @override
@@ -70,17 +96,23 @@ class ChatScreenState extends State<ChatScreen> {
 
   final Set<int> _selectedIds = <int>{};
 
-  /// Глобальный флаг (живёт на уровне класса, а не инстанса): если true —
-  /// все пузыри рендерятся без IntrinsicWidth до конца сессии приложения.
+  /// GlobalKey'и для скролла к сообщению. Чистятся при dispose.
+  final Map<int, GlobalKey> _msgKeys = {};
+
+  /// Подсвеченное сообщение (после клика по цитате).
+  int? _highlightedMsgId;
+
+  /// Поколение скролла — при новом клике старые итерации самоотменяются.
+  int _scrollGeneration = 0;
+
+  /// Глобальный флаг: true → все пузыри рендерятся без IntrinsicWidth.
   static final ValueNotifier<bool> _intrinsicWidthDisabled =
   ValueNotifier<bool>(false);
 
   static bool _errorHandlerInstalled = false;
 
-  /// Ставим один раз за жизнь процесса. Ловим ассерт
-  /// "RenderLine does not implement computeDryBaseline", который бросается
-  /// при IntrinsicWidth + WidgetSpan (кнопки/метка в code block, LaTeX)
-  /// на Windows-десктопе.
+  /// Ловим ассерт "RenderLine does not implement computeDryBaseline".
+  /// Проявляется на Windows при IntrinsicWidth + WidgetSpan (LaTeX).
   static void _installErrorHandler() {
     if (_errorHandlerInstalled) return;
     _errorHandlerInstalled = true;
@@ -90,23 +122,19 @@ class ChatScreenState extends State<ChatScreen> {
       final text = details.exceptionAsString();
       final isDryBaselineBug =
           text.contains('does not implement "computeDryBaseline"') ||
-              (text.contains('computeDryBaseline') && text.contains('RenderLine'));
+              (text.contains('computeDryBaseline') &&
+                  text.contains('RenderLine'));
       if (isDryBaselineBug && !_intrinsicWidthDisabled.value) {
         debugPrint(
           '[WORKAROUND] computeDryBaseline bug detected — '
               'IntrinsicWidth in message bubbles disabled for this session.',
         );
-        // onError вызывается во время layout-фазы, менять дерево оттуда
-        // нельзя (Build scheduled during frame). Поэтому ставим флаг
-        // в post-frame callback — тогда ValueListenableBuilder перестроится
-        // легально, между кадрами.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_intrinsicWidthDisabled.value) {
             _intrinsicWidthDisabled.value = true;
           }
         });
       }
-      // Обязательно прокидываем дальше — иначе проглотим реальные краши.
       if (original != null) {
         original(details);
       } else {
@@ -122,7 +150,7 @@ class ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       final fn = widget.focusNode;
       if (fn != null && fn.canRequestFocus && fn.hasFocus) {
-        final _ = Timer(const Duration(milliseconds: 50), () {
+        Timer(const Duration(milliseconds: 50), () {
           fn.requestFocus();
         });
       }
@@ -140,8 +168,11 @@ class ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _presenceTimer?.cancel();
     _presenceTimer = null;
+    _msgKeys.clear();
     super.dispose();
   }
+
+  // ---------- Утилиты ----------
 
   bool _isSameDay(DateTime a, DateTime b) {
     return a.year == b.year && a.month == b.month && a.day == b.day;
@@ -229,7 +260,10 @@ class ChatScreenState extends State<ChatScreen> {
     return result;
   }
 
-  void _wrapSelection(String prefix, String suffix, {String placeholder = 'текст'}) {
+  // ---------- Toolbar ----------
+
+  void _wrapSelection(String prefix, String suffix,
+      {String placeholder = 'текст'}) {
     final text = widget.controller.text;
     final sel = widget.controller.selection;
     if (!sel.isValid) {
@@ -280,15 +314,17 @@ class ChatScreenState extends State<ChatScreen> {
     if (!sel.isValid) {
       final newText = text + '\n$prefix';
       widget.controller.text = newText;
-      widget.controller.selection = TextSelection.collapsed(offset: newText.length);
+      widget.controller.selection =
+          TextSelection.collapsed(offset: newText.length);
       return;
     }
-    final lineStart = sel.start > 0
-        ? text.lastIndexOf('\n', sel.start - 1) + 1
-        : 0;
-    final newText = text.substring(0, lineStart) + prefix + text.substring(lineStart);
+    final lineStart =
+    sel.start > 0 ? text.lastIndexOf('\n', sel.start - 1) + 1 : 0;
+    final newText =
+        text.substring(0, lineStart) + prefix + text.substring(lineStart);
     widget.controller.text = newText;
-    widget.controller.selection = TextSelection.collapsed(offset: sel.start + prefix.length);
+    widget.controller.selection =
+        TextSelection.collapsed(offset: sel.start + prefix.length);
   }
 
   void _insertBlock(String block) {
@@ -380,6 +416,8 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ---------- Права ----------
+
   bool _canDelete(bool isMe) {
     final chatKey = widget.chatName;
     if (chatKey.startsWith('#')) return false;
@@ -402,19 +440,17 @@ class ChatScreenState extends State<ChatScreen> {
     return true;
   }
 
-  bool _canHideForMe() {
-    return !widget.chatName.startsWith('&');
-  }
+  bool _canHideForMe() => !widget.chatName.startsWith('&');
 
   bool _canHideAllSelected() {
     if (_selectedIds.isEmpty) return false;
     return _canHideForMe();
   }
 
+  // ---------- Выделение ----------
+
   void _enterSelection(int msgId) {
-    setState(() {
-      _selectedIds.add(msgId);
-    });
+    setState(() => _selectedIds.add(msgId));
   }
 
   void _toggleSelection(int msgId) {
@@ -431,6 +467,8 @@ class ChatScreenState extends State<ChatScreen> {
     if (_selectedIds.isEmpty) return;
     setState(() => _selectedIds.clear());
   }
+
+  // ---------- Копирование ----------
 
   String _buildCopyText() {
     final buf = StringBuffer();
@@ -499,6 +537,8 @@ class ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // ---------- Тап / долгий тап ----------
+
   void _handleTap(int msgId, String text, bool isMe, Offset globalPos) {
     if (_selectedIds.isNotEmpty) {
       _toggleSelection(msgId);
@@ -525,6 +565,17 @@ class ChatScreenState extends State<ChatScreen> {
   Future<void> _showContextMenu(
       int msgId, String text, bool isMe, RelativeRect position) async {
     final items = <PopupMenuEntry<String>>[
+      const PopupMenuItem<String>(
+        value: 'reply',
+        height: 44,
+        child: Row(
+          children: [
+            Icon(Icons.reply, size: 20),
+            SizedBox(width: 12),
+            Text('Ответить'),
+          ],
+        ),
+      ),
       const PopupMenuItem<String>(
         value: 'copy',
         height: 44,
@@ -575,7 +626,9 @@ class ChatScreenState extends State<ChatScreen> {
     );
 
     if (!mounted) return;
-    if (result == 'copy') {
+    if (result == 'reply') {
+      widget.onSetReply?.call(msgId);
+    } else if (result == 'copy') {
       _copyText(text);
     } else if (result == 'delete') {
       widget.onDeleteMessage?.call(msgId);
@@ -584,28 +637,154 @@ class ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Эвристика: содержит ли сообщение конструкцию, которую
-  /// flutter_ai_chat_markdown рендерит через WidgetSpan. На таких параграфах
-  /// IntrinsicWidth падает с "RenderLine does not implement computeDryBaseline".
-  ///
-  /// Известные триггеры:
-  ///   - code block ```...```  (кнопки «копировать» и метка языка)
-  ///   - LaTeX $...$ / $$...$$ (рендерится как отдельный виджет)
-  /// Простые инлайн-конструкции (`код`, **жирный**, [ссылки](url), списки,
-  /// цитаты, таблицы) WidgetSpan не создают и работают под IntrinsicWidth.
+  void _copyText(String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Текст скопирован')),
+    );
+  }
+
+  // ---------- Скролл к сообщению ----------
+
+  Future<void> _scrollToMessage(int targetId) async {
+    final gen = ++_scrollGeneration;
+
+    // Подсветка + автоснятие.
+    setState(() => _highlightedMsgId = targetId);
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted && _highlightedMsgId == targetId) {
+        setState(() => _highlightedMsgId = null);
+      }
+    });
+
+    // 1. Уже отрендерено — сразу ensureVisible.
+    final key = _msgKeys.putIfAbsent(targetId, () => GlobalKey());
+    if (key.currentContext != null) {
+      try {
+        await Scrollable.ensureVisible(
+          key.currentContext!,
+          duration: const Duration(milliseconds: 300),
+          alignment: 0.5,
+          curve: Curves.easeOutCubic,
+        );
+      } catch (_) {}
+      return;
+    }
+
+    // 2. Ищем индекс в списке. Не нашли — сообщение не в загруженной истории.
+    final msgs = widget.messages;
+    final idx = msgs.indexWhere((m) => m.id == targetId);
+    if (idx < 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Сообщение не в загруженной истории')),
+        );
+      }
+      if (mounted && _highlightedMsgId == targetId) {
+        setState(() => _highlightedMsgId = null);
+      }
+      return;
+    }
+
+    final sc = widget.scrollController;
+    if (sc == null || !sc.hasClients) return;
+
+    // 3. Итерации: оценка + animateTo + проверка. reverse:true → offset 0 = низ.
+    final revIndex = msgs.length - 1 - idx;
+    double avgHeight = 72.0;
+    const maxAttempts = 3;
+
+    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+      if (!mounted || gen != _scrollGeneration) return;
+      final estimated =
+      (revIndex * avgHeight).clamp(0.0, sc.position.maxScrollExtent);
+      try {
+        await sc.animateTo(
+          estimated,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+        );
+      } catch (_) {
+        return;
+      }
+      // Даём layout'у осесть.
+      await Future.delayed(const Duration(milliseconds: 30));
+      if (!mounted || gen != _scrollGeneration) return;
+
+      final ctx = _msgKeys[targetId]?.currentContext;
+      if (ctx != null) {
+        try {
+          await Scrollable.ensureVisible(
+            ctx,
+            duration: const Duration(milliseconds: 180),
+            alignment: 0.5,
+            curve: Curves.easeOutCubic,
+          );
+        } catch (_) {}
+        return;
+      }
+      // Не попали — уменьшаем оценку.
+      avgHeight *= 0.7;
+    }
+    // Сдались — подсветка останется на 1.5 сек как визуальный намёк.
+  }
+
+  // ---------- LaTeX-детект ----------
+
   /// Эвристика: содержит ли сообщение LaTeX-формулу ($...$ или $$...$$).
-  /// Только такие параграфы flutter_ai_chat_markdown рендерит через
-  /// WidgetSpan, и только на них IntrinsicWidth падает с
-  /// "RenderLine does not implement computeDryBaseline".
-  ///
-  /// Обычный текст, code block, таблицы, **жирный**, списки, цитаты,
-  /// инлайн-код и ссылки WidgetSpan не создают и работают под IntrinsicWidth.
+  /// На таких параграфах flutter_ai_chat_markdown рендерит WidgetSpan,
+  /// и IntrinsicWidth падает с "RenderLine does not implement computeDryBaseline".
   bool _mayContainWidgetSpan(String text) {
-    // $$...$$ или $...$ — с непустым содержимым, без переноса строки внутри.
     if (RegExp(r'\$\$[^$]+\$\$').hasMatch(text)) return true;
     if (RegExp(r'\$[^$\n]+\$').hasMatch(text)) return true;
     return false;
   }
+
+  // ---------- Reply preview в bubble ----------
+
+  Widget _buildReplyQuoteInBubble(
+      ReplyPreview quote, bool isMe, Color textColor) {
+    final accent =
+    isMe ? Colors.green[800]! : Theme.of(context).colorScheme.primary;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: isMe ? 0.06 : 0.12),
+          borderRadius: BorderRadius.circular(8),
+          border: Border(
+            left: BorderSide(color: accent, width: 3),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              quote.sender,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+                color: accent,
+              ),
+            ),
+            Text(
+              quote.text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                color: textColor.withValues(alpha: 0.85),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------- Пузырь ----------
 
   Widget _buildMessageBubble(
       int msgId,
@@ -613,6 +792,7 @@ class ChatScreenState extends State<ChatScreen> {
       String text,
       bool isMe,
       int timestamp,
+      int replyToId,
       bool isGroupOrChannel,
       double maxWidth,
       ) {
@@ -622,6 +802,7 @@ class ChatScreenState extends State<ChatScreen> {
     final textColor =
     isMe ? Colors.black87 : Theme.of(context).colorScheme.onSecondary;
     final isSelected = _selectedIds.contains(msgId);
+    final isHighlighted = _highlightedMsgId == msgId;
 
     final markdownTheme = MarkdownTheme.chatGptLight.copyWith(
       paragraph: TextStyle(color: textColor, fontSize: 14),
@@ -650,6 +831,12 @@ class ChatScreenState extends State<ChatScreen> {
       blockSpacing: 6.0,
     );
 
+    // Цитата (если есть).
+    ReplyPreview? quote;
+    if (replyToId != 0 && widget.resolveReply != null) {
+      quote = widget.resolveReply!(replyToId);
+    }
+
     final bubbleContent = Container(
       constraints: BoxConstraints(maxWidth: maxWidth),
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
@@ -657,7 +844,11 @@ class ChatScreenState extends State<ChatScreen> {
       decoration: BoxDecoration(
         color: backgroundColor,
         borderRadius: BorderRadius.circular(30),
-        border: isSelected ? Border.all(color: Colors.blue, width: 2) : null,
+        border: isSelected
+            ? Border.all(color: Colors.blue, width: 2)
+            : isHighlighted
+            ? Border.all(color: Colors.orange, width: 2.5)
+            : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -671,6 +862,12 @@ class ChatScreenState extends State<ChatScreen> {
                 fontSize: 12,
                 color: textColor,
               ),
+            ),
+          if (quote != null)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _scrollToMessage(replyToId),
+              child: _buildReplyQuoteInBubble(quote, isMe, textColor),
             ),
           MarkdownRenderer(
             data: _autoLink(text),
@@ -691,9 +888,6 @@ class ChatScreenState extends State<ChatScreen> {
       ),
     );
 
-    // Проблема computeDryBaseline проявляется, только когда в параграфе есть
-    // WidgetSpan. Для таких сообщений заранее отказываемся от IntrinsicWidth,
-    // чтобы не ловить каскадную лавину ошибок в layout.
     final forceNoIntrinsic = _mayContainWidgetSpan(text);
 
     final gestureWrapped = GestureDetector(
@@ -704,19 +898,102 @@ class ChatScreenState extends State<ChatScreen> {
       child: bubbleContent,
     );
 
+    // Обёртка с GlobalKey для скролла.
+    final keyedBubble = KeyedSubtree(
+      key: _msgKeys.putIfAbsent(msgId, () => GlobalKey()),
+      child: gestureWrapped,
+    );
+
+    // Свайп вправо → установить reply.
+    Widget swipeable = keyedBubble;
+    if (widget.onSetReply != null) {
+      swipeable = Dismissible(
+        key: ValueKey('reply_swipe_$msgId'),
+        direction: DismissDirection.startToEnd,
+        confirmDismiss: (dir) async {
+          widget.onSetReply!.call(msgId);
+          return false; // всегда откатываем — это не удаление
+        },
+        background: Container(
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.only(left: 28),
+          child: Icon(
+            Icons.reply,
+            color: Theme.of(context).colorScheme.primary,
+            size: 24,
+          ),
+        ),
+        child: keyedBubble,
+      );
+    }
+
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: LayoutErrorBoundary(
         nodeType: 'message_bubble',
         child: ValueListenableBuilder<bool>(
           valueListenable: _intrinsicWidthDisabled,
-          // child не пересоздаётся при переключении флага — только обёртка.
-          child: gestureWrapped,
+          child: swipeable,
           builder: (context, disabled, child) {
             if (disabled || forceNoIntrinsic) return child!;
             return IntrinsicWidth(child: child);
           },
         ),
+      ),
+    );
+  }
+
+  // ---------- Поле ввода ----------
+
+  Widget _buildReplyPreviewBar() {
+    final reply = widget.activeReply;
+    if (reply == null) return const SizedBox.shrink();
+
+    final accent = Theme.of(context).colorScheme.primary;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        border: Border(
+          top: BorderSide(color: Colors.grey[300]!),
+          left: BorderSide(color: accent, width: 4),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.reply, size: 16, color: accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  reply.sender,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    color: accent,
+                  ),
+                ),
+                Text(
+                  reply.text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: Colors.black87),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18),
+            tooltip: 'Отменить ответ',
+            onPressed: widget.onCancelReply,
+            splashRadius: 20,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
+        ],
       ),
     );
   }
@@ -786,6 +1063,7 @@ class ChatScreenState extends State<ChatScreen> {
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          _buildReplyPreviewBar(),
           _buildFormattingToolbar(),
           _buildInputField(inputPadding),
         ],
@@ -798,6 +1076,7 @@ class ChatScreenState extends State<ChatScreen> {
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            _buildReplyPreviewBar(),
             _buildFormattingToolbar(),
             _buildInputField(inputPadding),
           ],
@@ -809,9 +1088,11 @@ class ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // ---------- AppBars ----------
+
   AppBar _buildNormalAppBar() {
-    final String displayName = widget.titleOverride
-        ?? widget.chatName.replaceFirst(RegExp(r'^[#&]'), '');
+    final String displayName = widget.titleOverride ??
+        widget.chatName.replaceFirst(RegExp(r'^[#&]'), '');
     final bool isGroup = widget.chatName.startsWith('#');
     final bool isChannel = widget.chatName.startsWith('&');
     final IconData leadingIcon;
@@ -903,6 +1184,8 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ---------- Build ----------
+
   @override
   Widget build(BuildContext context) {
     final msgs = widget.messages;
@@ -927,6 +1210,7 @@ class ChatScreenState extends State<ChatScreen> {
         msg.text,
         msg.isMe,
         msg.timestamp,
+        msg.replyToId,
         isGroupOrChannel,
         maxBubbleWidth,
       ));
@@ -974,13 +1258,6 @@ class ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
     widget.onSendMessage(text);
     widget.controller.clear();
-  }
-
-  void _copyText(String text) {
-    Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Текст скопирован')),
-    );
   }
 
   Future<void> _openLink(String href) async {

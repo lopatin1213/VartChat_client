@@ -14,6 +14,8 @@ import 'login_screen.dart';
 
 enum ViewMode { chats, contacts, groups, channels }
 
+
+
 class ChatListScreen extends StatefulWidget {
   final WebSocketService wsService;
   final String username;
@@ -30,11 +32,9 @@ class ChatListScreen extends StatefulWidget {
 
 class _ChatListScreenState extends State<ChatListScreen>
     with WidgetsBindingObserver {
-  /// Сколько сообщений запрашиваем в одной пачке /history.
   static const int _historyPageSize = 1000;
-
-  /// Порог (px) от верхнего края скролла, при котором запрашиваем ещё.
   static const double _scrollTopThreshold = 400;
+  static const Duration _getMsgBatchDelay = Duration(milliseconds: 150);
 
   List<({String phone, String username, String displayName})> _contacts = [];
   List<String> _groups = [];
@@ -61,24 +61,31 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   final Map<String, TextEditingController> _draftControllers = {};
   final FocusNode _chatFocusNode = FocusNode();
-
   final Map<String, ScrollController> _scrollControllers = {};
 
-  final Map<String, List<({int id, String sender, String text, bool isMe, int timestamp})>>
-  _messages = {};
+  /// Сообщения по чату.
+  final Map<String, List<ChatMsg>> _messages = {};
 
-  /// Ключ — chatKey. true = вся история загружена.
+  /// Глобальный кэш цитат: msgId → данные. Заполняется из /getmsg.
+  final Map<int, ReplyPreview> _replyCache = {};
+
+  /// Какие msgId мы уже запрашивали через /getmsg (чтобы не спамить).
+  final Set<int> _requestedReplyIds = {};
+
+  /// Батч /getmsg: kind → set(msgId).
+  final Map<int, Set<int>> _pendingGetMsg = {};
+  Timer? _getMsgTimer;
+
+  /// Активный ответ: chatKey → msgId оригинала.
+  final Map<String, int> _replyToMsgId = {};
+
   final Map<String, bool> _fullyLoaded = {};
-
-  /// Ключи чатов, для которых сейчас идёт запрос истории.
   final Set<String> _historyLoading = {};
 
   static const List<int> _reconnectDelays = [1, 5, 10, 30, 60];
 
   int _getDelayForAttempt(int attempt) {
-    if (attempt < _reconnectDelays.length) {
-      return _reconnectDelays[attempt];
-    }
+    if (attempt < _reconnectDelays.length) return _reconnectDelays[attempt];
     return 60;
   }
 
@@ -99,6 +106,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     sc?.dispose();
     _fullyLoaded.remove(chatKey);
     _historyLoading.remove(chatKey);
+    _replyToMsgId.remove(chatKey);
   }
 
   String _resolveDisplayName(String username) {
@@ -112,6 +120,47 @@ class _ChatListScreenState extends State<ChatListScreen>
     if (chatKey.startsWith('#')) return Protocol.MSG_KIND_GROUP;
     if (chatKey.startsWith('&')) return Protocol.MSG_KIND_CHANNEL;
     return Protocol.MSG_KIND_PERSONAL;
+  }
+
+  String _chatKeyFor(String sender, String recipient, bool isMe) {
+    if (recipient.startsWith('#') || recipient.startsWith('&')) return recipient;
+    return isMe ? recipient : sender;
+  }
+
+  bool _hasMessageById(String chatKey, int id) {
+    final msgs = _messages[chatKey];
+    if (msgs == null) return false;
+    return msgs.any((m) => m.id == id);
+  }
+
+  /// Цитата для превью над полем ввода.
+  ReplyPreview? _getReplyData(String chatKey) {
+    final id = _replyToMsgId[chatKey];
+    if (id == null) return null;
+
+    final msgs = _messages[chatKey];
+    if (msgs != null) {
+      for (final m in msgs) {
+        if (m.id == id) {
+          return (sender: m.sender, text: m.text, isMe: m.isMe);
+        }
+      }
+    }
+    return _replyCache[id];
+  }
+
+  /// Найти цитату по msgId (для отрисовки внутри bubble). Сначала в messages,
+  /// потом в replyCache.
+  ReplyPreview? _resolveReplyFor(String chatKey, int replyToId) {
+    final msgs = _messages[chatKey];
+    if (msgs != null) {
+      for (final m in msgs) {
+        if (m.id == replyToId) {
+          return (sender: m.sender, text: m.text, isMe: m.isMe);
+        }
+      }
+    }
+    return _replyCache[replyToId];
   }
 
   @override
@@ -143,6 +192,11 @@ class _ChatListScreenState extends State<ChatListScreen>
     _periodicTimer = null;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    _getMsgTimer?.cancel();
+    _getMsgTimer = null;
+    _pendingGetMsg.clear();
+    _replyCache.clear();
+    _requestedReplyIds.clear();
     for (final c in _draftControllers.values) {
       c.dispose();
     }
@@ -193,12 +247,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     final allMessages = DatabaseService.getAllMessages();
     allMessages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
     for (var msg in allMessages) {
-      String chatKey;
-      if (msg.recipient.startsWith('#') || msg.recipient.startsWith('&')) {
-        chatKey = msg.recipient;
-      } else {
-        chatKey = (msg.sender == widget.username) ? msg.recipient : msg.sender;
-      }
+      final chatKey = _chatKeyFor(msg.sender, msg.recipient, msg.isMe);
       _messages.putIfAbsent(chatKey, () => []);
       _messages[chatKey]!.add((
       id: msg.id,
@@ -206,6 +255,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       text: msg.text,
       isMe: msg.isMe,
       timestamp: msg.timestamp.millisecondsSinceEpoch,
+      replyToId: msg.replyToId,
       ));
     }
   }
@@ -217,15 +267,10 @@ class _ChatListScreenState extends State<ChatListScreen>
       String text,
       bool isMe,
       int timestamp,
+      int replyToId,
       ) {
-    String chatKey;
-    if (recipient.startsWith('#') || recipient.startsWith('&')) {
-      chatKey = recipient;
-    } else {
-      chatKey = (sender == widget.username) ? recipient : sender;
-    }
+    final chatKey = _chatKeyFor(sender, recipient, isMe);
     final list = _messages.putIfAbsent(chatKey, () => []);
-    // Дедуп по id (логин присылает 5 сообщений, потом /history — те же самые).
     if (id != 0 && list.any((m) => m.id == id)) return;
     list.add((
     id: id,
@@ -233,6 +278,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     text: text,
     isMe: isMe,
     timestamp: timestamp,
+    replyToId: replyToId,
     ));
     list.sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
@@ -243,9 +289,48 @@ class _ChatListScreenState extends State<ChatListScreen>
       text: text,
       isMe: isMe,
       timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp),
+      replyToId: replyToId,
     );
     DatabaseService.saveMessage(message);
   }
+
+  // ---------- /getmsg ----------
+
+  void _scheduleGetMsg(int kind, int msgId) {
+    if (msgId == 0) return;
+    if (_requestedReplyIds.contains(msgId)) return;
+    _requestedReplyIds.add(msgId);
+    _pendingGetMsg.putIfAbsent(kind, () => <int>{}).add(msgId);
+    _getMsgTimer?.cancel();
+    _getMsgTimer = Timer(_getMsgBatchDelay, _flushGetMsg);
+  }
+
+  void _flushGetMsg() {
+    _getMsgTimer = null;
+    if (_pendingGetMsg.isEmpty) return;
+
+    final snapshot = Map<int, Set<int>>.from(_pendingGetMsg);
+    _pendingGetMsg.clear();
+
+    for (final entry in snapshot.entries) {
+      final kind = entry.key;
+      final ids = entry.value.toList();
+      if (ids.isEmpty) continue;
+      final parts = <String>['/getmsg', '$kind'];
+      for (final id in ids) {
+        parts.add('$id');
+      }
+      final cmd = parts.join(' ');
+      print('[REPLY] $cmd');
+      try {
+        widget.wsService.sendCommand(cmd);
+      } catch (e) {
+        print('[REPLY] Ошибка /getmsg: $e');
+      }
+    }
+  }
+
+  // ---------- Подписка / реконнект ----------
 
   void _subscribeToMessages() {
     _subscription?.cancel();
@@ -303,7 +388,13 @@ class _ChatListScreenState extends State<ChatListScreen>
         _lastSeen.clear();
         _channelInfo.clear();
         _contacts.clear();
+        _replyToMsgId.clear();
+        _pendingGetMsg.clear();
+        _replyCache.clear();
+        _requestedReplyIds.clear();
       });
+      _getMsgTimer?.cancel();
+      _getMsgTimer = null;
       _subscribeToMessages();
       _refreshChats();
       if (mounted) {
@@ -320,6 +411,8 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
   }
 
+  // ---------- Обработка входящих ----------
+
   void _handleIncomingMessage(Uint8List data) {
     try {
       final parsed = Protocol.parsePacket(data);
@@ -330,7 +423,6 @@ class _ChatListScreenState extends State<ChatListScreen>
         final text = Protocol.readString(payload, 0);
         debugPrint('[ChatList] SYSTEM: $text');
 
-        // Terminator истории.
         if (text.startsWith('[Система] history_done|')) {
           final rest = text.substring('[Система] history_done|'.length);
           final parts = rest.split('|');
@@ -416,7 +508,8 @@ class _ChatListScreenState extends State<ChatListScreen>
         }
 
         if (text.startsWith('[Система] Пользователи:')) {
-          final usersPart = text.replaceFirst('[Система] Пользователи:', '').trim();
+          final usersPart =
+          text.replaceFirst('[Система] Пользователи:', '').trim();
           if (!mounted) return;
           if (usersPart == 'Нет зарегистрированных пользователей') {
             setState(() {
@@ -425,7 +518,8 @@ class _ChatListScreenState extends State<ChatListScreen>
             });
           } else {
             final items = usersPart.split(',').map((s) => s.trim()).toList();
-            final parsed = <({String phone, String username, String displayName})>[];
+            final parsedList =
+            <({String phone, String username, String displayName})>[];
             final newLastSeen = <String, int>{};
             for (final item in items) {
               if (item.isEmpty) continue;
@@ -439,7 +533,7 @@ class _ChatListScreenState extends State<ChatListScreen>
               final lastSeen =
               parts.length > 3 ? int.tryParse(parts[3].trim()) : null;
               if (username.isEmpty) continue;
-              parsed.add((
+              parsedList.add((
               phone: phone,
               username: username,
               displayName: displayName,
@@ -449,7 +543,7 @@ class _ChatListScreenState extends State<ChatListScreen>
               }
             }
             setState(() {
-              _contacts = parsed;
+              _contacts = parsedList;
               _lastSeen
                 ..clear()
                 ..addAll(newLastSeen);
@@ -544,6 +638,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         final nonce = parsedUser.nonce;
         final timestamp = parsedUser.timestamp;
         final msgId = parsedUser.msgId;
+        final replyToId = parsedUser.replyToId;
 
         final key = widget.wsService.sessionKey;
         if (key == null) return;
@@ -551,22 +646,61 @@ class _ChatListScreenState extends State<ChatListScreen>
         CryptoService.decryptAesGcm(encrypted, key, nonce).then((plaintext) {
           final text = utf8.decode(plaintext, allowMalformed: true);
           final isMe = sender == widget.username;
-          if (mounted) {
-            setState(() {
-              _addMessageToChat(
-                  msgId, sender, recipient, text, isMe, timestamp);
-            });
+          if (!mounted) return;
+
+          setState(() {
+            _addMessageToChat(
+                msgId, sender, recipient, text, isMe, timestamp, replyToId);
+
+            // Если это ответ на /getmsg — кэшируем для будущих цитат.
+            if (msgId != 0) {
+              _replyCache[msgId] =
+              (sender: sender, text: text, isMe: isMe);
+              _requestedReplyIds.remove(msgId);
+            }
+          });
+
+          // Запрос цитаты, если её нет на клиенте.
+          if (replyToId != 0) {
+            final chatKey = _chatKeyFor(sender, recipient, isMe);
+            final kind = _kindForChat(chatKey);
+            if (!_hasMessageById(chatKey, replyToId) &&
+                !_replyCache.containsKey(replyToId)) {
+              _scheduleGetMsg(kind, replyToId);
+            }
           }
         }).catchError((e) {
           print('Ошибка расшифровки: $e');
         });
       } else if (type == Protocol.MSG_TYPE_DELETE) {
         if (payload.length < 9) return;
-        final msgId = ByteData.sublistView(payload, 0, 8).getInt64(0, Endian.big);
+        final msgId =
+        ByteData.sublistView(payload, 0, 8).getInt64(0, Endian.big);
         setState(() {
+          // Убираем само сообщение.
           for (final entry in _messages.entries) {
             entry.value.removeWhere((m) => m.id == msgId);
           }
+          // Снимаем цитаты, которые ссылались на это сообщение.
+          for (final entry in _messages.entries) {
+            final list = entry.value;
+            for (var i = 0; i < list.length; i++) {
+              final m = list[i];
+              if (m.replyToId == msgId) {
+                list[i] = (
+                id: m.id,
+                sender: m.sender,
+                text: m.text,
+                isMe: m.isMe,
+                timestamp: m.timestamp,
+                replyToId: 0,
+                );
+              }
+            }
+          }
+          _replyCache.remove(msgId);
+          // Отменяем активный reply, если он был на это сообщение.
+          _replyToMsgId.removeWhere((_, id) => id == msgId);
         });
         DatabaseService.deleteMessage(msgId);
       }
@@ -613,7 +747,6 @@ class _ChatListScreenState extends State<ChatListScreen>
     if (_historyLoading.contains(chatKey)) return;
     final pos = sc.position;
     if (pos.maxScrollExtent <= 0) return;
-    // reverse: true → верх истории = maxScrollExtent.
     if (pos.pixels >= pos.maxScrollExtent - _scrollTopThreshold) {
       _requestHistoryOlder(chatKey);
     }
@@ -636,6 +769,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       for (final entry in _messages.entries) {
         entry.value.removeWhere((m) => m.id == msgId);
       }
+      _replyToMsgId.removeWhere((_, id) => id == msgId);
     });
     DatabaseService.deleteMessage(msgId);
     try {
@@ -645,10 +779,26 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
   }
 
+  // ---------- Отправка ----------
+
   void _sendMessage(String chatKey, String text) {
-    widget.wsService.sendEncryptedMessage(chatKey, text);
+    final replyToId = _replyToMsgId[chatKey] ?? 0;
+    widget.wsService.sendEncryptedMessage(chatKey, text, replyToId: replyToId);
     _getController(chatKey).clear();
+    if (replyToId != 0) {
+      setState(() => _replyToMsgId.remove(chatKey));
+    }
   }
+
+  void _setReplyTo(String chatKey, int msgId) {
+    setState(() => _replyToMsgId[chatKey] = msgId);
+  }
+
+  void _cancelReply(String chatKey) {
+    setState(() => _replyToMsgId.remove(chatKey));
+  }
+
+  // ---------- Прочее ----------
 
   String _displayNameFor(String username) {
     for (final c in _contacts) {
@@ -661,9 +811,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     if (!chatKey.startsWith('&')) return ChannelRole.subscriber;
     final name = chatKey.substring(1);
     final info = _channelInfo[name];
-    if (info == null) {
-      return ChannelRole.subscriber;
-    }
+    if (info == null) return ChannelRole.subscriber;
     if (info.creator == widget.username) return ChannelRole.creator;
     if (info.isSubscribed) return ChannelRole.subscriber;
     return ChannelRole.guest;
@@ -1019,7 +1167,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       if (sc != null && sc.hasClients) {
         sc.jumpTo(0);
       }
-      // Триггерим загрузку истории.
       _requestHistoryInitial(chatKey);
     });
   }
@@ -1045,6 +1192,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     final isGroup = chatKey.startsWith('#');
     final role = isChannel ? _getChannelRole(chatKey) : null;
     final channelName = isChannel ? chatKey.substring(1) : null;
+    final activeReply = _getReplyData(chatKey);
 
     return ChatScreen(
       key: ValueKey('chat_$chatKey'),
@@ -1069,6 +1217,10 @@ class _ChatListScreenState extends State<ChatListScreen>
       onSubscribe: channelName != null
           ? () => _subscribeToChannel(channelName)
           : null,
+      activeReply: activeReply,
+      onSetReply: (msgId) => _setReplyTo(chatKey, msgId),
+      onCancelReply: () => _cancelReply(chatKey),
+      resolveReply: (replyToId) => _resolveReplyFor(chatKey, replyToId),
     );
   }
 

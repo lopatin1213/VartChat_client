@@ -226,6 +226,7 @@ class _LoginScreenState extends State<LoginScreen> {
         final encrypted = parsedUser.encrypted;
         final nonce = parsedUser.nonce;
         final timestamp = parsedUser.timestamp;
+        final replyToId = parsedUser.replyToId;   // ← НОВОЕ
 
         final key = _wsService.sessionKey;
         if (key == null) {
@@ -238,12 +239,13 @@ class _LoginScreenState extends State<LoginScreen> {
             final text = utf8.decode(plaintext, allowMalformed: true);
             final isMe = (sender == _currentUsername);
             final message = ChatMessage(
-              id: parsedUser.msgId,   // ← ИЗМЕНЕНО
+              id: parsedUser.msgId,
               sender: sender,
               recipient: recipient,
               text: text,
               isMe: isMe,
               timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp),
+              replyToId: replyToId,               // ← НОВОЕ
             );
             _historyMessages.add(message);
             print('[UI] История сохранена, всего сообщений: ${_historyMessages.length}');

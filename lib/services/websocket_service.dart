@@ -145,7 +145,10 @@ class WebSocketService {
     await Future.delayed(const Duration(milliseconds: 150));
   }
 
-  Future<void> sendEncryptedMessage(String recipient, String text) async {
+  /// Отправка зашифрованного сообщения.
+  /// [replyToId] — id сообщения, на которое отвечаем (0 = обычное сообщение).
+  Future<void> sendEncryptedMessage(String recipient, String text,
+      {int replyToId = 0}) async {
     if (_channel == null || _sessionKey == null) {
       throw Exception('Not ready');
     }
@@ -156,7 +159,15 @@ class WebSocketService {
     final ciphertext = result.ciphertext;
     final nonce = result.nonce;
     final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final packet = Protocol.buildUserPacket(sender, recipient, ciphertext, nonce, timestamp, 0);
+    final packet = Protocol.buildUserPacket(
+      sender,
+      recipient,
+      ciphertext,
+      nonce,
+      timestamp,
+      0,
+      replyToId: replyToId,
+    );
     _sendData(packet);
   }
 

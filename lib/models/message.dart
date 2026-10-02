@@ -5,7 +5,7 @@ part 'message.g.dart';
 @HiveType(typeId: 0)
 class ChatMessage extends HiveObject {
   @HiveField(0)
-  int id;   // ← ИЗМЕНЕНО: был String, теперь серверный int64. 0 = локальное/не подтверждено.
+  int id;
 
   @HiveField(1)
   String sender;
@@ -25,6 +25,11 @@ class ChatMessage extends HiveObject {
   @HiveField(6)
   int readStatus;
 
+  /// id сообщения, на которое это сообщение отвечает.
+  /// 0 = обычное, > 0 = reply на это msg_id.
+  @HiveField(7)
+  int replyToId;
+
   ChatMessage({
     required this.id,
     required this.sender,
@@ -32,6 +37,7 @@ class ChatMessage extends HiveObject {
     required this.text,
     required this.isMe,
     required this.timestamp,
-    this.readStatus = 0, // 0 = не прочитано, 1 = прочитано
+    this.readStatus = 0,
+    this.replyToId = 0,
   });
 }

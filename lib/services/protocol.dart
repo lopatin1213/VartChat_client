@@ -48,16 +48,19 @@ class Protocol {
     return packet;
   }
 
-  /// MSG_TYPE_USER: ... [timestamp 8][msg_id 8].
+  /// MSG_TYPE_USER: [0x01][sender][recipient][nonce 12][enc_len u32][encrypted]
+  ///                  [timestamp 8][msg_id 8][reply_to_id 8]
   /// При отправке клиент ставит msgId = 0 — сервер заменит на свой.
+  /// replyToId = 0 — обычное сообщение, > 0 — ответ на сообщение с этим id.
   static Uint8List buildUserPacket(
       String sender,
       String recipient,
       Uint8List encrypted,
       Uint8List nonce,
       int timestamp,
-      int msgId,
-      ) {
+      int msgId, {
+        int replyToId = 0,
+      }) {
     final senderBytes = Uint8List.fromList(utf8.encode(sender));
     final recipientBytes = Uint8List.fromList(utf8.encode(recipient));
     final totalLen = 1 +
@@ -66,7 +69,8 @@ class Protocol {
         12 +
         4 + encrypted.length +
         8 +   // timestamp
-        8;    // msgId
+        8 +   // msgId
+        8;    // replyToId
     final packet = Uint8List(totalLen);
     var offset = 0;
     packet[offset++] = MSG_TYPE_USER;
@@ -91,9 +95,15 @@ class Protocol {
     final idBytes = Uint8List(8);
     ByteData.sublistView(idBytes).setInt64(0, msgId, Endian.big);
     packet.setAll(offset, idBytes);
+    offset += 8;
+    final replyBytes = Uint8List(8);
+    ByteData.sublistView(replyBytes).setInt64(0, replyToId, Endian.big);
+    packet.setAll(offset, replyBytes);
     return packet;
   }
 
+  /// Разбор MSG_TYPE_USER. replyToId = 0, если сервер прислал пакет старого
+  /// формата (без байтов reply_to_id) — обратная совместимость.
   static ({
   String sender,
   String recipient,
@@ -101,6 +111,7 @@ class Protocol {
   Uint8List nonce,
   int timestamp,
   int msgId,
+  int replyToId,
   }) parseUserPacket(Uint8List payload) {
     var offset = 0;
     final senderLen = _readUint32(payload, offset);
@@ -120,10 +131,20 @@ class Protocol {
     final tsBytes = payload.sublist(offset, offset + 8);
     final timestamp = ByteData.sublistView(tsBytes).getInt64(0, Endian.big);
     offset += 8;
+
     int msgId = 0;
     if (payload.length >= offset + 8) {
-      msgId = ByteData.sublistView(payload, offset, offset + 8).getInt64(0, Endian.big);
+      msgId = ByteData.sublistView(payload, offset, offset + 8)
+          .getInt64(0, Endian.big);
+      offset += 8;
     }
+
+    int replyToId = 0;
+    if (payload.length >= offset + 8) {
+      replyToId = ByteData.sublistView(payload, offset, offset + 8)
+          .getInt64(0, Endian.big);
+    }
+
     return (
     sender: sender,
     recipient: recipient,
@@ -131,10 +152,10 @@ class Protocol {
     nonce: nonce,
     timestamp: timestamp,
     msgId: msgId,
+    replyToId: replyToId,
     );
   }
 
-  /// MSG_TYPE_DELETE: [0x05][kind u8][msg_id i64 BE] = 10 байт.
   /// MSG_TYPE_DELETE: [0x05][msg_id i64 BE][kind u8][type u8?].
   /// type: 0 = у всех (по умолчанию, байт не пишется), 1 = у себя.
   static Uint8List buildDeletePacket(int msgId, int kind, {int type = 0}) {

@@ -909,8 +909,9 @@ class ChatScreenState extends State<ChatScreen> {
     if (widget.onSetReply != null) {
       swipeable = Dismissible(
         key: ValueKey('reply_swipe_$msgId'),
-        direction: DismissDirection.startToEnd,
-        confirmDismiss: (dir) async {
+        direction: DismissDirection.endToStart,
+
+          confirmDismiss: (dir) async {
           widget.onSetReply!.call(msgId);
           return false; // всегда откатываем — это не удаление
         },

@@ -8,8 +8,8 @@ class Protocol {
   static const int MSG_TYPE_AUTH = 0x04;
   static const int MSG_TYPE_DELETE = 0x05;
   static const int MSG_TYPE_LOGOUT = 0x06;
+  static const int MSG_TYPE_READ = 0x07;
 
-  // kind для MSG_TYPE_DELETE
   static const int MSG_KIND_PERSONAL = 1;
   static const int MSG_KIND_GROUP = 2;
   static const int MSG_KIND_CHANNEL = 3;
@@ -38,7 +38,8 @@ class Protocol {
     return packet;
   }
 
-  static Uint8List buildTokenPacket(String token, {String device = 'flutter', String? fcmToken}) {
+  static Uint8List buildTokenPacket(String token,
+      {String device = 'flutter', String? fcmToken}) {
     final authData = "token|$token|$device|${fcmToken ?? ''}";
     final bytes = Uint8List.fromList(utf8.encode(authData));
     final packet = Uint8List(1 + 4 + bytes.length);
@@ -48,10 +49,9 @@ class Protocol {
     return packet;
   }
 
-  /// MSG_TYPE_USER: [0x01][sender][recipient][nonce 12][enc_len u32][encrypted]
-  ///                  [timestamp 8][msg_id 8][reply_to_id 8]
-  /// При отправке клиент ставит msgId = 0 — сервер заменит на свой.
-  /// replyToId = 0 — обычное сообщение, > 0 — ответ на сообщение с этим id.
+  /// MSG_TYPE_USER:
+  /// [0x01][sender][recipient][nonce 12][enc_len u32][encrypted]
+  /// [timestamp 8][msg_id 8][reply_to_id 8]
   static Uint8List buildUserPacket(
       String sender,
       String recipient,
@@ -68,9 +68,9 @@ class Protocol {
         4 + recipientBytes.length +
         12 +
         4 + encrypted.length +
-        8 +   // timestamp
-        8 +   // msgId
-        8;    // replyToId
+        8 +
+        8 +
+        8;
     final packet = Uint8List(totalLen);
     var offset = 0;
     packet[offset++] = MSG_TYPE_USER;
@@ -102,8 +102,8 @@ class Protocol {
     return packet;
   }
 
-  /// Разбор MSG_TYPE_USER. replyToId = 0, если сервер прислал пакет старого
-  /// формата (без байтов reply_to_id) — обратная совместимость.
+  /// Разбор MSG_TYPE_USER.
+  /// Суффикс (опционально, для совместимости): [flag_me u8][flag_any u8] и [views u32] для каналов.
   static ({
   String sender,
   String recipient,
@@ -112,6 +112,9 @@ class Protocol {
   int timestamp,
   int msgId,
   int replyToId,
+  bool flagMe,
+  bool flagAny,
+  int? views,
   }) parseUserPacket(Uint8List payload) {
     var offset = 0;
     final senderLen = _readUint32(payload, offset);
@@ -120,7 +123,8 @@ class Protocol {
     offset += senderLen;
     final recipientLen = _readUint32(payload, offset);
     offset += 4;
-    final recipient = utf8.decode(payload.sublist(offset, offset + recipientLen));
+    final recipient =
+    utf8.decode(payload.sublist(offset, offset + recipientLen));
     offset += recipientLen;
     final nonce = payload.sublist(offset, offset + 12);
     offset += 12;
@@ -143,6 +147,24 @@ class Protocol {
     if (payload.length >= offset + 8) {
       replyToId = ByteData.sublistView(payload, offset, offset + 8)
           .getInt64(0, Endian.big);
+      offset += 8;
+    }
+
+    bool flagMe = false;
+    if (payload.length >= offset + 1) {
+      flagMe = payload[offset] != 0;
+      offset += 1;
+    }
+    bool flagAny = false;
+    if (payload.length >= offset + 1) {
+      flagAny = payload[offset] != 0;
+      offset += 1;
+    }
+
+    int? views;
+    if (payload.length >= offset + 4) {
+      views = ByteData.sublistView(payload, offset, offset + 4)
+          .getUint32(0, Endian.big);
     }
 
     return (
@@ -153,11 +175,44 @@ class Protocol {
     timestamp: timestamp,
     msgId: msgId,
     replyToId: replyToId,
+    flagMe: flagMe,
+    flagAny: flagAny,
+    views: views,
     );
   }
 
-  /// MSG_TYPE_DELETE: [0x05][msg_id i64 BE][kind u8][type u8?].
-  /// type: 0 = у всех (по умолчанию, байт не пишется), 1 = у себя.
+  /// MSG_TYPE_READ: [0x07][count u16 BE][{kind u8, msg_id i64 BE} × N].
+  static Uint8List buildReadPacket(List<({int kind, int msgId})> items) {
+    final size = 1 + 2 + items.length * 9;
+    final packet = Uint8List(size);
+    var off = 0;
+    packet[off++] = MSG_TYPE_READ;
+    packet[off++] = (items.length >> 8) & 0xFF;
+    packet[off++] = items.length & 0xFF;
+    for (final it in items) {
+      packet[off++] = it.kind;
+      ByteData.sublistView(packet, off, off + 8)
+          .setInt64(0, it.msgId, Endian.big);
+      off += 8;
+    }
+    return packet;
+  }
+
+  static List<({int kind, int msgId})> parseReadPacket(Uint8List payload) {
+    if (payload.length < 2) return [];
+    final count = (payload[0] << 8) | payload[1];
+    if (payload.length < 2 + count * 9) return [];
+    final out = <({int kind, int msgId})>[];
+    for (var i = 0; i < count; i++) {
+      final off = 2 + i * 9;
+      final kind = payload[off];
+      final msgId = ByteData.sublistView(payload, off + 1, off + 9)
+          .getInt64(0, Endian.big);
+      out.add((kind: kind, msgId: msgId));
+    }
+    return out;
+  }
+
   static Uint8List buildDeletePacket(int msgId, int kind, {int type = 0}) {
     final size = (type == 0) ? 10 : 11;
     final packet = Uint8List(size);
@@ -168,7 +223,6 @@ class Protocol {
     return packet;
   }
 
-  /// MSG_TYPE_LOGOUT: [0x06][token_len u32 BE][token utf8].
   static Uint8List buildLogoutPacket(String token) {
     final tokenBytes = Uint8List.fromList(utf8.encode(token));
     final packet = Uint8List(1 + 4 + tokenBytes.length);

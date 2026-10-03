@@ -12,7 +12,8 @@ import 'package:web_socket_channel/io.dart';
 class WebSocketService {
   WebSocketChannel? _channel;
   StreamController<Uint8List>? _messageController;
-  Stream<Uint8List> get onMessage => _messageController?.stream ?? const Stream.empty();
+  Stream<Uint8List> get onMessage =>
+      _messageController?.stream ?? const Stream.empty();
 
   bool get isConnected => _channel != null && _channel!.closeCode == null;
 
@@ -26,6 +27,7 @@ class WebSocketService {
     _currentUsername = username;
     _fcmToken = fcmToken;
   }
+
   void _sendData(Uint8List data) {
     print('[WS] sendData: длина=${data.length}, hex=${CryptoService.bytesToHex(data)}');
     _channel!.sink.add(data);
@@ -33,7 +35,9 @@ class WebSocketService {
 
   Future<void> connect(String serverUrl) async {
     await disconnect();
-    if (serverUrl.trim().isEmpty) throw Exception('Адрес сервера не может быть пустым');
+    if (serverUrl.trim().isEmpty) {
+      throw Exception('Адрес сервера не может быть пустым');
+    }
 
     _messageController = StreamController<Uint8List>.broadcast();
 
@@ -80,7 +84,6 @@ class WebSocketService {
     final publicKey = keyPair.publicKey;
 
     await StorageService.savePrivateKey(privateKey);
-
     _sendData(publicKey);
 
     final serverPublicKey = await _messageController!.stream
@@ -92,7 +95,8 @@ class WebSocketService {
       throw Exception('Handshake timeout');
     });
 
-    final sharedSecret = CryptoService.computeSharedSecret(privateKey, serverPublicKey);
+    final sharedSecret =
+    CryptoService.computeSharedSecret(privateKey, serverPublicKey);
     final key = await CryptoService.deriveKey(sharedSecret);
     print('[WS] Handshake: ключ сессии = ${CryptoService.bytesToHex(key)}');
     _sessionKey = key;
@@ -122,12 +126,12 @@ class WebSocketService {
       device: device,
       fcmToken: fcmToken ?? _fcmToken,
     );
-    // Вход: чистим сообщения, но hidden_messages НЕ трогаем.
     await DatabaseService.clearData();
     _sendData(packet);
   }
 
-  Future<void> sendToken(String token, {String? fcmToken, String device = 'flutter'}) async {
+  Future<void> sendToken(String token,
+      {String? fcmToken, String device = 'flutter'}) async {
     if (_channel == null) throw Exception('Not connected');
     final packet = Protocol.buildTokenPacket(
       token,
@@ -137,7 +141,6 @@ class WebSocketService {
     _sendData(packet);
   }
 
-  /// MSG_TYPE_LOGOUT (0x06). После — короткая пауза, чтобы сервер успел обработать.
   Future<void> sendLogout(String token) async {
     if (_channel == null) throw Exception('Not connected');
     final packet = Protocol.buildLogoutPacket(token);
@@ -145,8 +148,6 @@ class WebSocketService {
     await Future.delayed(const Duration(milliseconds: 150));
   }
 
-  /// Отправка зашифрованного сообщения.
-  /// [replyToId] — id сообщения, на которое отвечаем (0 = обычное сообщение).
   Future<void> sendEncryptedMessage(String recipient, String text,
       {int replyToId = 0}) async {
     if (_channel == null || _sessionKey == null) {
@@ -177,6 +178,14 @@ class WebSocketService {
     _sendData(packet);
   }
 
+  /// 0x07: пометить сообщения прочитанными.
+  Future<void> sendRead(List<({int kind, int msgId})> items) async {
+    if (_channel == null) throw Exception('Not connected');
+    if (items.isEmpty) return;
+    final packet = Protocol.buildReadPacket(items);
+    _sendData(packet);
+  }
+
   Future<void> sendCommand(String cmd) async {
     if (_channel == null) throw Exception('Not connected');
     final packet = Protocol.buildStringPacket(Protocol.MSG_TYPE_COMMAND, cmd);
@@ -204,7 +213,6 @@ class WebSocketService {
     }
   }
 
-  /// Logout: чистит всё, включая hidden_messages.
   Future<void> resetSession() async {
     await disconnect();
     await StorageService.clearAll();

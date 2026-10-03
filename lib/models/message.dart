@@ -25,10 +25,17 @@ class ChatMessage extends HiveObject {
   @HiveField(6)
   int readStatus;
 
-  /// id сообщения, на которое это сообщение отвечает.
-  /// 0 = обычное, > 0 = reply на это msg_id.
   @HiveField(7)
   int replyToId;
+
+  @HiveField(8)
+  bool readMe;
+
+  @HiveField(9)
+  bool readAny;
+
+  @HiveField(10)
+  int? views;
 
   ChatMessage({
     required this.id,
@@ -39,5 +46,8 @@ class ChatMessage extends HiveObject {
     required this.timestamp,
     this.readStatus = 0,
     this.replyToId = 0,
+    this.readMe = false,
+    this.readAny = false,
+    this.views,
   });
 }

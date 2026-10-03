@@ -11,13 +11,11 @@ import 'services/fcm_service.dart';
 import 'dart:io';
 
 void main() {
-  // В release все print() внутри зоны гасятся (в т.ч. утечки ключей/hex).
-  // В debug — всё как обычно.
   if (!kDebugMode) {
     runZoned(
       _bootstrap,
       zoneSpecification: ZoneSpecification(
-        print: (_, __, ___, String line) {},
+        print: (_, _, _, String line) {},
       ),
     );
   } else {
@@ -34,14 +32,13 @@ Future<void> _bootstrap() async {
     final configDir = Directory('$home/.config/VartChat');
     await configDir.create(recursive: true);
     Hive.init(configDir.path);
-  } else if (Platform.isWindows){
+  } else if (Platform.isWindows) {
     final home = Platform.environment['LOCALAPPDATA'] ?? '.';
     final configDir = Directory('$home/VartChat');
     await configDir.create(recursive: true);
     Hive.init(configDir.path);
-
   } else {
-    Hive.initFlutter();
+    await Hive.initFlutter();
   }
 
   await initializeDateFormatting('ru', null);
@@ -50,10 +47,9 @@ Future<void> _bootstrap() async {
   Hive.registerAdapter(ChatMessageAdapter());
   Hive.registerAdapter(ChatAdapter());
 
-  // Сбрасываем Hive-бокс messages при апгрейде схемы (String id → int id).
   final prefs = await SharedPreferences.getInstance();
   const schemaKey = 'messages_schema_version';
-  const currentSchema = 3;
+  const currentSchema = 4;
   if ((prefs.getInt(schemaKey) ?? 1) < currentSchema) {
     await Hive.deleteBoxFromDisk('messages');
     await prefs.setInt(schemaKey, currentSchema);
@@ -62,7 +58,6 @@ Future<void> _bootstrap() async {
   await Hive.openBox<ChatMessage>('messages');
   await Hive.openBox<Chat>('chats');
 
-  // Старый локальный бокс скрытых больше не используется — удаляем при апгрейде.
   if ((prefs.getInt('hidden_messages_removed') ?? 0) < 1) {
     try {
       await Hive.deleteBoxFromDisk('hidden_messages');

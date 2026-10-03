@@ -7,7 +7,6 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/websocket_service.dart';
 
-/// Тип сообщения в списке. replyToId = 0 → не ответ.
 typedef ChatMsg = ({
 int id,
 String sender,
@@ -15,9 +14,11 @@ String text,
 bool isMe,
 int timestamp,
 int replyToId,
+bool readMe,
+bool readAny,
+int? views,
 });
 
-/// Данные цитаты (для превью над полем ввода и внутри bubble).
 typedef ReplyPreview = ({String sender, String text, bool isMe});
 
 enum ChannelRole { creator, subscriber, guest }
@@ -33,9 +34,9 @@ class ChatScreen extends StatefulWidget {
   final void Function(int msgId)? onDeleteMessage;
   final void Function(int msgId)? onHideForMe;
   final String Function(String username)? resolveDisplayName;
+  final void Function(List<int> msgIds)? onMarkRead;
 
   final ScrollController? scrollController;
-
   final VoidCallback? onBack;
   final bool isWide;
 
@@ -48,17 +49,9 @@ class ChatScreen extends StatefulWidget {
   final TextEditingController controller;
   final FocusNode? focusNode;
 
-  /// Активный reply: если != null, над полем ввода показывается превью.
   final ReplyPreview? activeReply;
-
-  /// Установить reply на сообщение [msgId] (свайп вправо / пункт меню).
   final void Function(int msgId)? onSetReply;
-
-  /// Отменить активный reply.
   final VoidCallback? onCancelReply;
-
-  /// Получить данные цитаты по msgId для отрисовки внутри bubble.
-  /// Возвращает null, если цитата ещё не загружена.
   final ReplyPreview? Function(int replyToId)? resolveReply;
 
   const ChatScreen({
@@ -71,6 +64,7 @@ class ChatScreen extends StatefulWidget {
     required this.controller,
     this.onDeleteMessage,
     this.onHideForMe,
+    this.onMarkRead,
     this.resolveDisplayName,
     this.scrollController,
     this.focusNode,
@@ -95,24 +89,19 @@ class ChatScreenState extends State<ChatScreen> {
   Timer? _presenceTimer;
 
   final Set<int> _selectedIds = <int>{};
-
-  /// GlobalKey'и для скролла к сообщению. Чистятся при dispose.
   final Map<int, GlobalKey> _msgKeys = {};
-
-  /// Подсвеченное сообщение (после клика по цитате).
   int? _highlightedMsgId;
-
-  /// Поколение скролла — при новом клике старые итерации самоотменяются.
   int _scrollGeneration = 0;
 
-  /// Глобальный флаг: true → все пузыри рендерятся без IntrinsicWidth.
+  /// Для кнопки "вниз" и автоотправки 0x07: считаем себя "внизу", если
+  /// скролл близко к 0 (при reverse: true).
+  bool _isAtBottom = true;
+  int _lastMessagesLength = 0;
+
   static final ValueNotifier<bool> _intrinsicWidthDisabled =
   ValueNotifier<bool>(false);
-
   static bool _errorHandlerInstalled = false;
 
-  /// Ловим ассерт "RenderLine does not implement computeDryBaseline".
-  /// Проявляется на Windows при IntrinsicWidth + WidgetSpan (LaTeX).
   static void _installErrorHandler() {
     if (_errorHandlerInstalled) return;
     _errorHandlerInstalled = true;
@@ -146,6 +135,8 @@ class ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _lastMessagesLength = widget.messages.length;
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final fn = widget.focusNode;
@@ -156,6 +147,11 @@ class ChatScreenState extends State<ChatScreen> {
       }
     });
 
+    final sc = widget.scrollController;
+    if (sc != null) {
+      sc.addListener(_onScrollListener);
+    }
+
     _presenceTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (!mounted) return;
       if (widget.titleOverride == null) return;
@@ -165,11 +161,79 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   @override
+  void didUpdateWidget(covariant ChatScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.scrollController != widget.scrollController) {
+      oldWidget.scrollController?.removeListener(_onScrollListener);
+      widget.scrollController?.addListener(_onScrollListener);
+    }
+    _handleNewMessages();
+  }
+
+  @override
   void dispose() {
     _presenceTimer?.cancel();
     _presenceTimer = null;
+    widget.scrollController?.removeListener(_onScrollListener);
     _msgKeys.clear();
     super.dispose();
+  }
+
+  void _onScrollListener() {
+    final sc = widget.scrollController;
+    if (sc == null || !sc.hasClients) return;
+    // reverse: true → offset 0 = низ.
+    final atBottom = sc.offset < 80;
+    if (atBottom != _isAtBottom) {
+      setState(() => _isAtBottom = atBottom);
+    }
+    if (atBottom) {
+      _sendReadForVisible();
+    }
+  }
+
+  /// Собрать непрочитанные (для нас) и отправить 0x07.
+  void _sendReadForVisible() {
+    if (widget.onMarkRead == null) return;
+    final ids = <int>[];
+    for (final m in widget.messages) {
+      if (m.isMe) continue;
+      if (m.id == 0) continue;
+      if (m.readMe) continue;
+      if (widget.chatName.startsWith('#') && m.readAny) continue;
+      ids.add(m.id);
+    }
+    if (ids.isEmpty) return;
+    widget.onMarkRead!(ids);
+  }
+
+  void _handleNewMessages() {
+    final len = widget.messages.length;
+    if (len <= _lastMessagesLength) {
+      _lastMessagesLength = len;
+      return;
+    }
+    final newOnes = widget.messages.sublist(_lastMessagesLength);
+    _lastMessagesLength = len;
+
+    // Если мы внизу — сразу отметим прочитанными.
+    if (_isAtBottom && widget.onMarkRead != null) {
+      final ids = <int>[];
+      for (final m in newOnes) {
+        if (m.isMe) continue;
+        if (m.id == 0) continue;
+        if (m.readMe) continue;
+        ids.add(m.id);
+      }
+      if (ids.isNotEmpty) {
+        widget.onMarkRead!(ids);
+      }
+    }
+
+    // Если последнее сообщение наше — прыгаем вниз.
+    if (newOnes.isNotEmpty && newOnes.last.isMe) {
+      _scrollToBottom();
+    }
   }
 
   // ---------- Утилиты ----------
@@ -312,7 +376,7 @@ class ChatScreenState extends State<ChatScreen> {
     final text = widget.controller.text;
     final sel = widget.controller.selection;
     if (!sel.isValid) {
-      final newText = text + '\n$prefix';
+      final newText = '$text\n$prefix';
       widget.controller.text = newText;
       widget.controller.selection =
           TextSelection.collapsed(offset: newText.length);
@@ -481,10 +545,10 @@ class ChatScreenState extends State<ChatScreen> {
       if (!_selectedIds.contains(msg.id)) continue;
 
       final label = _senderLabel(msg.sender);
-      final isAdjacent = prevIdx != null && i == prevIdx! + 1;
+      final isAdjacent = prevIdx != null && i == prevIdx + 1;
       final sameSender = prevLabel == label;
       final withinMinute =
-          prevTs != null && (msg.timestamp - prevTs!).abs() <= 60000;
+          prevTs != null && (msg.timestamp - prevTs).abs() <= 60000;
       final continueBlock = isAdjacent && sameSender && withinMinute;
 
       if (continueBlock) {
@@ -644,12 +708,24 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Скролл к сообщению ----------
+  // ---------- Скролл ----------
+
+  void _scrollToBottom() {
+    final sc = widget.scrollController;
+    if (sc == null || !sc.hasClients) return;
+    final distance = sc.offset;
+    if (distance <= 0.5) return;
+    final durationMs = distance.clamp(80.0, 300.0).toInt();
+    sc.animateTo(
+      0,
+      duration: Duration(milliseconds: durationMs),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   Future<void> _scrollToMessage(int targetId) async {
     final gen = ++_scrollGeneration;
 
-    // Подсветка + автоснятие.
     setState(() => _highlightedMsgId = targetId);
     Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted && _highlightedMsgId == targetId) {
@@ -657,7 +733,6 @@ class ChatScreenState extends State<ChatScreen> {
       }
     });
 
-    // 1. Уже отрендерено — сразу ensureVisible.
     final key = _msgKeys.putIfAbsent(targetId, () => GlobalKey());
     if (key.currentContext != null) {
       try {
@@ -671,7 +746,6 @@ class ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    // 2. Ищем индекс в списке. Не нашли — сообщение не в загруженной истории.
     final msgs = widget.messages;
     final idx = msgs.indexWhere((m) => m.id == targetId);
     if (idx < 0) {
@@ -689,10 +763,9 @@ class ChatScreenState extends State<ChatScreen> {
     final sc = widget.scrollController;
     if (sc == null || !sc.hasClients) return;
 
-    // 3. Итерации: оценка + animateTo + проверка. reverse:true → offset 0 = низ.
     final revIndex = msgs.length - 1 - idx;
     double avgHeight = 72.0;
-    const maxAttempts = 3;
+    const maxAttempts = 6;
 
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       if (!mounted || gen != _scrollGeneration) return;
@@ -701,13 +774,12 @@ class ChatScreenState extends State<ChatScreen> {
       try {
         await sc.animateTo(
           estimated,
-          duration: const Duration(milliseconds: 200),
+          duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
         );
       } catch (_) {
         return;
       }
-      // Даём layout'у осесть.
       await Future.delayed(const Duration(milliseconds: 30));
       if (!mounted || gen != _scrollGeneration) return;
 
@@ -723,24 +795,21 @@ class ChatScreenState extends State<ChatScreen> {
         } catch (_) {}
         return;
       }
-      // Не попали — уменьшаем оценку.
-      avgHeight *= 0.7;
+      // Определяем направление: если цель выше экрана — увеличиваем offset,
+      // если ниже — уменьшаем. Смотрим, какой из отрендеренных ключей ближе.
+      avgHeight *= 0.6;
     }
-    // Сдались — подсветка останется на 1.5 сек как визуальный намёк.
   }
 
   // ---------- LaTeX-детект ----------
 
-  /// Эвристика: содержит ли сообщение LaTeX-формулу ($...$ или $$...$$).
-  /// На таких параграфах flutter_ai_chat_markdown рендерит WidgetSpan,
-  /// и IntrinsicWidth падает с "RenderLine does not implement computeDryBaseline".
   bool _mayContainWidgetSpan(String text) {
     if (RegExp(r'\$\$[^$]+\$\$').hasMatch(text)) return true;
     if (RegExp(r'\$[^$\n]+\$').hasMatch(text)) return true;
     return false;
   }
 
-  // ---------- Reply preview в bubble ----------
+  // ---------- Цитата в bubble ----------
 
   Widget _buildReplyQuoteInBubble(
       ReplyPreview quote, bool isMe, Color textColor) {
@@ -762,7 +831,7 @@ class ChatScreenState extends State<ChatScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              quote.sender,
+              _senderLabel(quote.sender),
               style: TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 12,
@@ -784,6 +853,55 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ---------- Галочки / views ----------
+
+  Widget _buildStatusIcons(ChatMsg m, Color textColor) {
+    final isChannel = widget.chatName.startsWith('&');
+    final children = <Widget>[];
+
+    if (isChannel && m.views != null) {
+      children.add(Icon(
+        Icons.visibility,
+        size: 12,
+        color: textColor.withValues(alpha: 0.7),
+      ));
+      children.add(const SizedBox(width: 2));
+      children.add(Text(
+        '${m.views}',
+        style: TextStyle(
+          fontSize: 10,
+          color: textColor.withValues(alpha: 0.7),
+        ),
+      ));
+    }
+
+    if (m.isMe && !isChannel) {
+      if (children.isNotEmpty) {
+        children.add(const SizedBox(width: 4));
+      }
+      final IconData icon;
+      final Color color;
+      if (m.id == 0) {
+        // Локальное, ещё не подтверждено сервером.
+        icon = Icons.access_time;
+        color = textColor.withValues(alpha: 0.5);
+      } else if (m.readAny) {
+        icon = Icons.done_all;
+        color = Colors.blue[700]!;
+      } else {
+        icon = Icons.done;
+        color = textColor.withValues(alpha: 0.7);
+      }
+      children.add(Icon(icon, size: 12, color: color));
+    }
+
+    if (children.isEmpty) return const SizedBox.shrink();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: children,
+    );
+  }
+
   // ---------- Пузырь ----------
 
   Widget _buildMessageBubble(
@@ -793,6 +911,9 @@ class ChatScreenState extends State<ChatScreen> {
       bool isMe,
       int timestamp,
       int replyToId,
+      bool readMe,
+      bool readAny,
+      int? views,
       bool isGroupOrChannel,
       double maxWidth,
       ) {
@@ -831,7 +952,6 @@ class ChatScreenState extends State<ChatScreen> {
       blockSpacing: 6.0,
     );
 
-    // Цитата (если есть).
     ReplyPreview? quote;
     if (replyToId != 0 && widget.resolveReply != null) {
       quote = widget.resolveReply!(replyToId);
@@ -874,14 +994,34 @@ class ChatScreenState extends State<ChatScreen> {
             theme: markdownTheme,
             onTapLink: (url) => _openLink(url),
           ),
-          Container(
-            alignment: Alignment.bottomRight,
-            child: Text(
-              DateFormat('HH:mm').format(date),
-              style: TextStyle(
-                fontSize: 10,
-                color: textColor.withValues(alpha: 0.7),
-              ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Text(
+                  DateFormat('HH:mm').format(date),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: textColor.withValues(alpha: 0.7),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                _buildStatusIcons(
+                  (
+                  id: msgId,
+                  sender: sender,
+                  text: text,
+                  isMe: isMe,
+                  timestamp: timestamp,
+                  replyToId: replyToId,
+                  readMe: readMe,
+                  readAny: readAny,
+                  views: views,
+                  ),
+                  textColor,
+                ),
+              ],
             ),
           ),
         ],
@@ -898,26 +1038,26 @@ class ChatScreenState extends State<ChatScreen> {
       child: bubbleContent,
     );
 
-    // Обёртка с GlobalKey для скролла.
     final keyedBubble = KeyedSubtree(
       key: _msgKeys.putIfAbsent(msgId, () => GlobalKey()),
       child: gestureWrapped,
     );
 
-    // Свайп вправо → установить reply.
+    // Свайп влево → установить reply.
+
     Widget swipeable = keyedBubble;
     if (widget.onSetReply != null) {
       swipeable = Dismissible(
         key: ValueKey('reply_swipe_$msgId'),
         direction: DismissDirection.endToStart,
-
-          confirmDismiss: (dir) async {
+        confirmDismiss: (dir) async {
           widget.onSetReply!.call(msgId);
-          return false; // всегда откатываем — это не удаление
+          return false;
         },
-        background: Container(
-          alignment: Alignment.centerLeft,
-          padding: const EdgeInsets.only(left: 28),
+        background: const SizedBox.shrink(),
+        secondaryBackground: Container(
+          alignment: Alignment.centerRight,
+          padding: const EdgeInsets.only(right: 38),
           child: Icon(
             Icons.reply,
             color: Theme.of(context).colorScheme.primary,
@@ -944,7 +1084,7 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Поле ввода ----------
+  // ---------- Reply preview над полем ввода ----------
 
   Widget _buildReplyPreviewBar() {
     final reply = widget.activeReply;
@@ -970,7 +1110,7 @@ class ChatScreenState extends State<ChatScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  reply.sender,
+                  _senderLabel(reply.sender),
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 12,
@@ -1129,8 +1269,9 @@ class ChatScreenState extends State<ChatScreen> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 14,
-                      fontWeight:
-                      widget.isOnline ? FontWeight.w600 : FontWeight.normal,
+                      fontWeight: widget.isOnline
+                          ? FontWeight.w600
+                          : FontWeight.normal,
                       color: widget.isOnline
                           ? Colors.green
                           : Theme.of(context)
@@ -1185,6 +1326,72 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ---------- Кнопка "вниз" с бейджем ----------
+
+  int _unreadCount() {
+    var n = 0;
+    for (final m in widget.messages) {
+      if (m.isMe) continue;
+      if (m.readMe) continue;
+      n++;
+    }
+    return n;
+  }
+
+  Widget _buildScrollToBottomButton() {
+    final n = _unreadCount();
+    return Material(
+      elevation: 4,
+      shape: const CircleBorder(),
+      color: Theme.of(context).colorScheme.surface,
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: () {
+          _scrollToBottom();
+          _sendReadForVisible();
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Icon(
+                Icons.keyboard_arrow_down,
+                size: 24,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              if (n > 0)
+                Positioned(
+                  right: -8,
+                  top: -8,
+                  child: Container(
+                    padding:
+                    const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    constraints:
+                    const BoxConstraints(minWidth: 18, minHeight: 18),
+                    child: Center(
+                      child: Text(
+                        n > 99 ? '99+' : '$n',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // ---------- Build ----------
 
   @override
@@ -1212,6 +1419,9 @@ class ChatScreenState extends State<ChatScreen> {
         msg.isMe,
         msg.timestamp,
         msg.replyToId,
+        msg.readMe,
+        msg.readAny,
+        msg.views,
         isGroupOrChannel,
         maxBubbleWidth,
       ));
@@ -1239,12 +1449,22 @@ class ChatScreenState extends State<ChatScreen> {
         body: Column(
           children: [
             Expanded(
-              child: ListView.builder(
-                controller: widget.scrollController,
-                reverse: true,
-                itemCount: items.length,
-                itemBuilder: (context, index) =>
-                items[items.length - 1 - index],
+              child: Stack(
+                children: [
+                  ListView.builder(
+                    controller: widget.scrollController,
+                    reverse: true,
+                    itemCount: items.length,
+                    itemBuilder: (context, index) =>
+                    items[items.length - 1 - index],
+                  ),
+                  if (!_isAtBottom && msgs.isNotEmpty)
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: _buildScrollToBottomButton(),
+                    ),
+                ],
               ),
             ),
             _buildBottomArea(inputPadding),
@@ -1259,6 +1479,8 @@ class ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
     widget.onSendMessage(text);
     widget.controller.clear();
+    // Прыгаем вниз — сообщение уже отправлено, эхо скоро придёт.
+    _scrollToBottom();
   }
 
   Future<void> _openLink(String href) async {

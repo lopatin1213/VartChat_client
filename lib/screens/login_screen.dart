@@ -226,7 +226,10 @@ class _LoginScreenState extends State<LoginScreen> {
         final encrypted = parsedUser.encrypted;
         final nonce = parsedUser.nonce;
         final timestamp = parsedUser.timestamp;
-        final replyToId = parsedUser.replyToId;   // ← НОВОЕ
+        final replyToId = parsedUser.replyToId;
+        final flagMe = parsedUser.flagMe;
+        final flagAny = parsedUser.flagAny;
+        final views = parsedUser.views;
 
         final key = _wsService.sessionKey;
         if (key == null) {
@@ -245,7 +248,10 @@ class _LoginScreenState extends State<LoginScreen> {
               text: text,
               isMe: isMe,
               timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp),
-              replyToId: replyToId,               // ← НОВОЕ
+              replyToId: replyToId,
+              readMe: flagMe,
+              readAny: flagAny,
+              views: views,
             );
             _historyMessages.add(message);
             print('[UI] История сохранена, всего сообщений: ${_historyMessages.length}');

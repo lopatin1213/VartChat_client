@@ -226,7 +226,11 @@ class ChatScreenState extends State<ChatScreen> {
         ids.add(m.id);
       }
       if (ids.isNotEmpty) {
-        widget.onMarkRead!(ids);
+        // didUpdateWidget выполняется во время build родителя — нельзя
+        // звать setState наружу оттуда. Откладываем на post-frame.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) widget.onMarkRead!(ids);
+        });
       }
     }
 

@@ -149,7 +149,7 @@ class WebSocketService {
   }
 
   Future<void> sendEncryptedMessage(String recipient, String text,
-      {int replyToId = 0}) async {
+      {int replyToId = 0, int? timestamp}) async {
     if (_channel == null || _sessionKey == null) {
       throw Exception('Not ready');
     }
@@ -159,13 +159,13 @@ class WebSocketService {
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
     final ciphertext = result.ciphertext;
     final nonce = result.nonce;
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final ts = timestamp ?? DateTime.now().millisecondsSinceEpoch;
     final packet = Protocol.buildUserPacket(
       sender,
       recipient,
       ciphertext,
       nonce,
-      timestamp,
+      ts,
       0,
       replyToId: replyToId,
     );

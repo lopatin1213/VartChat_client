@@ -17,6 +17,7 @@ int replyToId,
 bool readMe,
 bool readAny,
 int? views,
+bool edited,
 });
 
 typedef ReplyPreview = ({String sender, String text, bool isMe});
@@ -33,6 +34,7 @@ class ChatScreen extends StatefulWidget {
   final void Function(String text) onSendMessage;
   final void Function(int msgId)? onDeleteMessage;
   final void Function(int msgId)? onHideForMe;
+  final void Function(int msgId, String newText)? onEditMessage;
   final String Function(String username)? resolveDisplayName;
   final void Function(List<int> msgIds)? onMarkRead;
 
@@ -64,6 +66,7 @@ class ChatScreen extends StatefulWidget {
     required this.controller,
     this.onDeleteMessage,
     this.onHideForMe,
+    this.onEditMessage,
     this.onMarkRead,
     this.resolveDisplayName,
     this.scrollController,
@@ -91,10 +94,19 @@ class ChatScreenState extends State<ChatScreen> {
   final Set<int> _selectedIds = <int>{};
   final Map<int, GlobalKey> _msgKeys = {};
   int? _highlightedMsgId;
+
+  /// msgId, для которого временно отключён Markdown-рендер,
+  /// чтобы можно было выделить текст.
+  int? _mdDisabledForId;
+
+  /// Режим редактирования: id сообщения, которое сейчас редактируется.
+  int? _editingMsgId;
+
+  /// Черновик, сохранённый при входе в режим редактирования.
+  String? _savedDraft;
+
   int _scrollGeneration = 0;
 
-  /// Для кнопки "вниз" и автоотправки 0x07: считаем себя "внизу", если
-  /// скролл близко к 0 (при reverse: true).
   bool _isAtBottom = true;
   int _lastMessagesLength = 0;
 
@@ -167,11 +179,25 @@ class ChatScreenState extends State<ChatScreen> {
       oldWidget.scrollController?.removeListener(_onScrollListener);
       widget.scrollController?.addListener(_onScrollListener);
     }
+    if (oldWidget.chatName != widget.chatName) {
+      // Сменили чат — выходим из режима редактирования без восстановления
+      // черновика (он относится к прошлому чату).
+      _editingMsgId = null;
+      _savedDraft = null;
+    }
     _handleNewMessages();
   }
 
   @override
   void dispose() {
+    // Если уходим в режиме редактирования — вернём черновик,
+    // чтобы при следующем заходе поле не содержало текст чужого сообщения.
+    if (_editingMsgId != null) {
+      final draft = _savedDraft ?? '';
+      widget.controller.text = draft;
+      widget.controller.selection =
+          TextSelection.collapsed(offset: draft.length);
+    }
     _presenceTimer?.cancel();
     _presenceTimer = null;
     widget.scrollController?.removeListener(_onScrollListener);
@@ -182,7 +208,6 @@ class ChatScreenState extends State<ChatScreen> {
   void _onScrollListener() {
     final sc = widget.scrollController;
     if (sc == null || !sc.hasClients) return;
-    // reverse: true → offset 0 = низ.
     final atBottom = sc.offset < 80;
     if (atBottom != _isAtBottom) {
       setState(() => _isAtBottom = atBottom);
@@ -192,7 +217,6 @@ class ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Собрать непрочитанные (для нас) и отправить 0x07.
   void _sendReadForVisible() {
     if (widget.onMarkRead == null) return;
     final ids = <int>[];
@@ -216,7 +240,6 @@ class ChatScreenState extends State<ChatScreen> {
     final newOnes = widget.messages.sublist(_lastMessagesLength);
     _lastMessagesLength = len;
 
-    // Если мы внизу — сразу отметим прочитанными.
     if (_isAtBottom && widget.onMarkRead != null) {
       final ids = <int>[];
       for (final m in newOnes) {
@@ -226,21 +249,16 @@ class ChatScreenState extends State<ChatScreen> {
         ids.add(m.id);
       }
       if (ids.isNotEmpty) {
-        // didUpdateWidget выполняется во время build родителя — нельзя
-        // звать setState наружу оттуда. Откладываем на post-frame.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) widget.onMarkRead!(ids);
         });
       }
     }
 
-    // Если последнее сообщение наше — прыгаем вниз.
-    if (newOnes.isNotEmpty && newOnes.last.isMe) {
+    if (newOnes.isNotEmpty && newOnes.last.isMe && _editingMsgId == null) {
       _scrollToBottom();
     }
   }
-
-  // ---------- Утилиты ----------
 
   bool _isSameDay(DateTime a, DateTime b) {
     return a.year == b.year && a.month == b.month && a.day == b.day;
@@ -328,8 +346,6 @@ class ChatScreenState extends State<ChatScreen> {
     return result;
   }
 
-  // ---------- Toolbar ----------
-
   void _wrapSelection(String prefix, String suffix,
       {String placeholder = 'текст'}) {
     final text = widget.controller.text;
@@ -380,7 +396,7 @@ class ChatScreenState extends State<ChatScreen> {
     final text = widget.controller.text;
     final sel = widget.controller.selection;
     if (!sel.isValid) {
-      final newText = '$text\n$prefix';
+      final newText = text + '\n$prefix';
       widget.controller.text = newText;
       widget.controller.selection =
           TextSelection.collapsed(offset: newText.length);
@@ -484,11 +500,17 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Права ----------
-
   bool _canDelete(bool isMe) {
     final chatKey = widget.chatName;
     if (chatKey.startsWith('#')) return false;
+    if (chatKey.startsWith('&')) {
+      return widget.channelRole == ChannelRole.creator;
+    }
+    return isMe;
+  }
+
+  bool _canEdit(bool isMe) {
+    final chatKey = widget.chatName;
     if (chatKey.startsWith('&')) {
       return widget.channelRole == ChannelRole.creator;
     }
@@ -515,8 +537,6 @@ class ChatScreenState extends State<ChatScreen> {
     return _canHideForMe();
   }
 
-  // ---------- Выделение ----------
-
   void _enterSelection(int msgId) {
     setState(() => _selectedIds.add(msgId));
   }
@@ -533,10 +553,11 @@ class ChatScreenState extends State<ChatScreen> {
 
   void _clearSelection() {
     if (_selectedIds.isEmpty) return;
-    setState(() => _selectedIds.clear());
+    setState(() {
+      _selectedIds.clear();
+      _mdDisabledForId = null;
+    });
   }
-
-  // ---------- Копирование ----------
 
   String _buildCopyText() {
     final buf = StringBuffer();
@@ -549,10 +570,10 @@ class ChatScreenState extends State<ChatScreen> {
       if (!_selectedIds.contains(msg.id)) continue;
 
       final label = _senderLabel(msg.sender);
-      final isAdjacent = prevIdx != null && i == prevIdx + 1;
+      final isAdjacent = prevIdx != null && i == prevIdx! + 1;
       final sameSender = prevLabel == label;
       final withinMinute =
-          prevTs != null && (msg.timestamp - prevTs).abs() <= 60000;
+          prevTs != null && (msg.timestamp - prevTs!).abs() <= 60000;
       final continueBlock = isAdjacent && sameSender && withinMinute;
 
       if (continueBlock) {
@@ -605,9 +626,17 @@ class ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ---------- Тап / долгий тап ----------
-
   void _handleTap(int msgId, String text, bool isMe, Offset globalPos) {
+    if (!mounted) return;
+    if (_mdDisabledForId != null) {
+      if (_mdDisabledForId != msgId) {
+        setState(() {
+          _mdDisabledForId = null;
+          _selectedIds.clear();
+        });
+      }
+      return;
+    }
     if (_selectedIds.isNotEmpty) {
       _toggleSelection(msgId);
       return;
@@ -623,11 +652,22 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   void _handleLongPress(int msgId) {
+    if (_mdDisabledForId != null) {
+      setState(() {
+        _mdDisabledForId = null;
+        _selectedIds.clear();
+      });
+      return;
+    }
     if (_selectedIds.isEmpty) {
       _enterSelection(msgId);
-    } else {
-      _toggleSelection(msgId);
+      return;
     }
+    if (_selectedIds.contains(msgId) && _selectedIds.length == 1) {
+      setState(() => _mdDisabledForId = msgId);
+      return;
+    }
+    _toggleSelection(msgId);
   }
 
   Future<void> _showContextMenu(
@@ -656,6 +696,21 @@ class ChatScreenState extends State<ChatScreen> {
         ),
       ),
     ];
+    if (msgId != 0 && _canEdit(isMe)) {
+      items.add(
+        const PopupMenuItem<String>(
+          value: 'edit',
+          height: 44,
+          child: Row(
+            children: [
+              Icon(Icons.edit, size: 20),
+              SizedBox(width: 12),
+              Text('Редактировать'),
+            ],
+          ),
+        ),
+      );
+    }
     if (_canDelete(isMe)) {
       items.add(
         const PopupMenuItem<String>(
@@ -695,14 +750,62 @@ class ChatScreenState extends State<ChatScreen> {
 
     if (!mounted) return;
     if (result == 'reply') {
+      if (_editingMsgId != null) _cancelEdit();
       widget.onSetReply?.call(msgId);
     } else if (result == 'copy') {
       _copyText(text);
+    } else if (result == 'edit') {
+      _startEdit(msgId, text);
     } else if (result == 'delete') {
       widget.onDeleteMessage?.call(msgId);
     } else if (result == 'hide') {
       widget.onHideForMe?.call(msgId);
     }
+  }
+
+  /// Войти в режим редактирования.
+  /// - сохраняет текущий черновик поля ввода,
+  /// - ставит в поле текст редактируемого сообщения и выделяет его,
+  /// - сбрасывает reply и выделение,
+  /// - фокусирует поле.
+  void _startEdit(int msgId, String text) {
+    if (!mounted) return;
+    if (_editingMsgId == msgId) {
+      widget.focusNode?.requestFocus();
+      return;
+    }
+    if (_editingMsgId == null) {
+      _savedDraft = widget.controller.text;
+    }
+    if (widget.activeReply != null) {
+      widget.onCancelReply?.call();
+    }
+    setState(() {
+      _editingMsgId = msgId;
+      _selectedIds.clear();
+      _mdDisabledForId = null;
+      widget.controller.text = text;
+      widget.controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: text.length,
+      );
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.focusNode?.requestFocus();
+    });
+  }
+
+  /// Выйти из режима редактирования, восстановив черновик.
+  void _cancelEdit() {
+    if (_editingMsgId == null) return;
+    final draft = _savedDraft ?? '';
+    setState(() {
+      _editingMsgId = null;
+      _savedDraft = null;
+      widget.controller.text = draft;
+      widget.controller.selection =
+          TextSelection.collapsed(offset: draft.length);
+    });
   }
 
   void _copyText(String text) {
@@ -711,8 +814,6 @@ class ChatScreenState extends State<ChatScreen> {
       const SnackBar(content: Text('Текст скопирован')),
     );
   }
-
-  // ---------- Скролл ----------
 
   void _scrollToBottom() {
     final sc = widget.scrollController;
@@ -727,6 +828,43 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Диапазон [min, max] индексов видимых (отрендеренных) сообщений.
+  /// null, если ничего не отрендерено.
+  (int, int)? _visibleIndexRange(List<ChatMsg> msgs) {
+    int? minVis;
+    int? maxVis;
+    for (int j = 0; j < msgs.length; j++) {
+      final k = _msgKeys[msgs[j].id];
+      if (k != null && k.currentContext != null) {
+        minVis ??= j;
+        maxVis = j;
+      }
+    }
+    if (minVis == null || maxVis == null) return null;
+    return (minVis, maxVis);
+  }
+
+  Future<void> _safeAnimateTo(ScrollController sc, double offset) async {
+    try {
+      await sc.animateTo(
+        offset,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _safeEnsureVisible(BuildContext ctx) async {
+    try {
+      await Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 180),
+        alignment: 0.5,
+        curve: Curves.easeOutCubic,
+      );
+    } catch (_) {}
+  }
+
   Future<void> _scrollToMessage(int targetId) async {
     final gen = ++_scrollGeneration;
 
@@ -738,15 +876,10 @@ class ChatScreenState extends State<ChatScreen> {
     });
 
     final key = _msgKeys.putIfAbsent(targetId, () => GlobalKey());
+
+    // 1. Уже видно — доводим до центра.
     if (key.currentContext != null) {
-      try {
-        await Scrollable.ensureVisible(
-          key.currentContext!,
-          duration: const Duration(milliseconds: 300),
-          alignment: 0.5,
-          curve: Curves.easeOutCubic,
-        );
-      } catch (_) {}
+      await _safeEnsureVisible(key.currentContext!);
       return;
     }
 
@@ -767,53 +900,62 @@ class ChatScreenState extends State<ChatScreen> {
     final sc = widget.scrollController;
     if (sc == null || !sc.hasClients) return;
 
-    final revIndex = msgs.length - 1 - idx;
-    double avgHeight = 72.0;
-    const maxAttempts = 6;
+    // 2. Первая оценка — средняя высота из ТЕКУЩЕГО содержимого,
+    //    а не константа 72.
+    final maxScroll = sc.position.maxScrollExtent;
+    final total = msgs.length;
+    final revIndex = total - 1 - idx;
+    final avg = total > 1 ? (maxScroll / (total - 1)) : 72.0;
+    final firstGuess = (revIndex * avg).clamp(0.0, maxScroll);
 
-    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+    await _safeAnimateTo(sc, firstGuess);
+    if (!mounted || gen != _scrollGeneration) return;
+    if (key.currentContext != null) {
+      await _safeEnsureVisible(key.currentContext!);
+      return;
+    }
+
+    // 3. Итеративные шаги. Направление — по видимому диапазону.
+    final viewportH = sc.position.viewportDimension;
+    final step = (viewportH * 0.75).clamp(120.0, 900.0);
+    const maxSteps = 40;
+
+    for (int i = 0; i < maxSteps; i++) {
       if (!mounted || gen != _scrollGeneration) return;
-      final estimated =
-      (revIndex * avgHeight).clamp(0.0, sc.position.maxScrollExtent);
-      try {
-        await sc.animateTo(
-          estimated,
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutCubic,
-        );
-      } catch (_) {
+
+      final vr = _visibleIndexRange(msgs);
+      if (vr == null) return;
+      final (minVis, maxVis) = vr;
+
+      double next;
+      if (idx < minVis) {
+        // Цель выше видимых (в reverse-координатах — увеличиваем offset).
+        next = (sc.position.pixels + step).clamp(0.0, maxScroll);
+      } else if (idx > maxVis) {
+        // Цель ниже видимых (уменьшаем offset).
+        next = (sc.position.pixels - step).clamp(0.0, maxScroll);
+      } else {
+        // Цель попадает в видимый диапазон, но контекст не найден — выходим.
         return;
       }
-      await Future.delayed(const Duration(milliseconds: 30));
+
+      if ((next - sc.position.pixels).abs() < 1.0) return;
+
+      await _safeAnimateTo(sc, next);
       if (!mounted || gen != _scrollGeneration) return;
 
-      final ctx = _msgKeys[targetId]?.currentContext;
-      if (ctx != null) {
-        try {
-          await Scrollable.ensureVisible(
-            ctx,
-            duration: const Duration(milliseconds: 180),
-            alignment: 0.5,
-            curve: Curves.easeOutCubic,
-          );
-        } catch (_) {}
+      if (key.currentContext != null) {
+        await _safeEnsureVisible(key.currentContext!);
         return;
       }
-      // Определяем направление: если цель выше экрана — увеличиваем offset,
-      // если ниже — уменьшаем. Смотрим, какой из отрендеренных ключей ближе.
-      avgHeight *= 0.6;
     }
   }
-
-  // ---------- LaTeX-детект ----------
 
   bool _mayContainWidgetSpan(String text) {
     if (RegExp(r'\$\$[^$]+\$\$').hasMatch(text)) return true;
     if (RegExp(r'\$[^$\n]+\$').hasMatch(text)) return true;
     return false;
   }
-
-  // ---------- Цитата в bubble ----------
 
   Widget _buildReplyQuoteInBubble(
       ReplyPreview quote, bool isMe, Color textColor) {
@@ -857,8 +999,6 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Галочки / views ----------
-
   Widget _buildStatusIcons(ChatMsg m, Color textColor) {
     final isChannel = widget.chatName.startsWith('&');
     final children = <Widget>[];
@@ -886,7 +1026,6 @@ class ChatScreenState extends State<ChatScreen> {
       final IconData icon;
       final Color color;
       if (m.id == 0) {
-        // Локальное, ещё не подтверждено сервером.
         icon = Icons.access_time;
         color = textColor.withValues(alpha: 0.5);
       } else if (m.readAny) {
@@ -906,8 +1045,6 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Пузырь ----------
-
   Widget _buildMessageBubble(
       int msgId,
       String sender,
@@ -918,6 +1055,7 @@ class ChatScreenState extends State<ChatScreen> {
       bool readMe,
       bool readAny,
       int? views,
+      bool edited,
       bool isGroupOrChannel,
       double maxWidth,
       ) {
@@ -928,6 +1066,8 @@ class ChatScreenState extends State<ChatScreen> {
     isMe ? Colors.black87 : Theme.of(context).colorScheme.onSecondary;
     final isSelected = _selectedIds.contains(msgId);
     final isHighlighted = _highlightedMsgId == msgId;
+    final mdDisabled = _mdDisabledForId == msgId;
+    final isBeingEdited = _editingMsgId == msgId;
 
     final markdownTheme = MarkdownTheme.chatGptLight.copyWith(
       paragraph: TextStyle(color: textColor, fontSize: 14),
@@ -961,6 +1101,22 @@ class ChatScreenState extends State<ChatScreen> {
       quote = widget.resolveReply!(replyToId);
     }
 
+    Widget body;
+    if (mdDisabled) {
+      body = SelectionArea(
+        child: Text(
+          text,
+          style: TextStyle(color: textColor, fontSize: 14),
+        ),
+      );
+    } else {
+      body = MarkdownRenderer(
+        data: _autoLink(text),
+        theme: markdownTheme,
+        onTapLink: (url) => _openLink(url),
+      );
+    }
+
     final bubbleContent = Container(
       constraints: BoxConstraints(maxWidth: maxWidth),
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
@@ -972,6 +1128,10 @@ class ChatScreenState extends State<ChatScreen> {
             ? Border.all(color: Colors.blue, width: 2)
             : isHighlighted
             ? Border.all(color: Colors.orange, width: 2.5)
+            : isBeingEdited
+            ? Border.all(
+            color: Theme.of(context).colorScheme.primary,
+            width: 2)
             : null,
       ),
       child: Column(
@@ -993,11 +1153,7 @@ class ChatScreenState extends State<ChatScreen> {
               onTap: () => _scrollToMessage(replyToId),
               child: _buildReplyQuoteInBubble(quote, isMe, textColor),
             ),
-          MarkdownRenderer(
-            data: _autoLink(text),
-            theme: markdownTheme,
-            onTapLink: (url) => _openLink(url),
-          ),
+          body,
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Row(
@@ -1010,6 +1166,17 @@ class ChatScreenState extends State<ChatScreen> {
                     color: textColor.withValues(alpha: 0.7),
                   ),
                 ),
+                if (edited) ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    'изм.',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontStyle: FontStyle.italic,
+                      color: textColor.withValues(alpha: 0.7),
+                    ),
+                  ),
+                ],
                 const SizedBox(width: 4),
                 _buildStatusIcons(
                   (
@@ -1022,6 +1189,7 @@ class ChatScreenState extends State<ChatScreen> {
                   readMe: readMe,
                   readAny: readAny,
                   views: views,
+                  edited: edited,
                   ),
                   textColor,
                 ),
@@ -1033,6 +1201,23 @@ class ChatScreenState extends State<ChatScreen> {
     );
 
     final forceNoIntrinsic = _mayContainWidgetSpan(text);
+
+    if (mdDisabled) {
+      return Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: LayoutErrorBoundary(
+          nodeType: 'message_bubble',
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _intrinsicWidthDisabled,
+            child: bubbleContent,
+            builder: (context, disabled, child) {
+              if (disabled || forceNoIntrinsic) return child!;
+              return IntrinsicWidth(child: child);
+            },
+          ),
+        ),
+      );
+    }
 
     final gestureWrapped = GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -1047,21 +1232,20 @@ class ChatScreenState extends State<ChatScreen> {
       child: gestureWrapped,
     );
 
-    // Свайп влево → установить reply.
-
     Widget swipeable = keyedBubble;
     if (widget.onSetReply != null) {
       swipeable = Dismissible(
         key: ValueKey('reply_swipe_$msgId'),
         direction: DismissDirection.endToStart,
         confirmDismiss: (dir) async {
+          if (_editingMsgId != null) _cancelEdit();
           widget.onSetReply!.call(msgId);
           return false;
         },
         background: const SizedBox.shrink(),
         secondaryBackground: Container(
           alignment: Alignment.centerRight,
-          padding: const EdgeInsets.only(right: 38),
+          padding: const EdgeInsets.only(right: 28),
           child: Icon(
             Icons.reply,
             color: Theme.of(context).colorScheme.primary,
@@ -1087,8 +1271,6 @@ class ChatScreenState extends State<ChatScreen> {
       ),
     );
   }
-
-  // ---------- Reply preview над полем ввода ----------
 
   Widget _buildReplyPreviewBar() {
     final reply = widget.activeReply;
@@ -1143,7 +1325,70 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Панель над полем ввода в режиме редактирования.
+  Widget _buildEditPreviewBar() {
+    final msgId = _editingMsgId;
+    if (msgId == null) return const SizedBox.shrink();
+
+    String previewText = '';
+    for (final m in widget.messages) {
+      if (m.id == msgId) {
+        previewText = m.text;
+        break;
+      }
+    }
+
+    final accent = Theme.of(context).colorScheme.primary;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        border: Border(
+          top: BorderSide(color: Colors.grey[300]!),
+          left: BorderSide(color: accent, width: 4),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.edit, size: 16, color: accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Редактирование',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    color: accent,
+                  ),
+                ),
+                Text(
+                  previewText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: Colors.black87),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18),
+            tooltip: 'Отменить редактирование',
+            onPressed: _cancelEdit,
+            splashRadius: 20,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildInputField(EdgeInsets padding) {
+    final isEditing = _editingMsgId != null;
     return Padding(
       padding: padding,
       child: Row(
@@ -1152,9 +1397,9 @@ class ChatScreenState extends State<ChatScreen> {
             child: TextField(
               controller: widget.controller,
               focusNode: widget.focusNode,
-              decoration: const InputDecoration(
-                hintText: 'Сообщение...',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                hintText: isEditing ? 'Редактирование...' : 'Сообщение...',
+                border: const OutlineInputBorder(),
               ),
               keyboardType: TextInputType.multiline,
               textInputAction: TextInputAction.newline,
@@ -1165,7 +1410,8 @@ class ChatScreenState extends State<ChatScreen> {
           ),
           const SizedBox(width: 8),
           IconButton(
-            icon: const Icon(Icons.send),
+            icon: Icon(isEditing ? Icons.check : Icons.send),
+            tooltip: isEditing ? 'Сохранить' : 'Отправить',
             onPressed: _sendMessage,
           ),
         ],
@@ -1204,11 +1450,20 @@ class ChatScreenState extends State<ChatScreen> {
 
   Widget _buildBottomArea(EdgeInsets inputPadding) {
     final isChannel = widget.chatName.startsWith('&');
+    final isEditing = _editingMsgId != null;
+
+    Widget previewBar;
+    if (isEditing) {
+      previewBar = _buildEditPreviewBar();
+    } else {
+      previewBar = _buildReplyPreviewBar();
+    }
+
     if (!isChannel) {
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _buildReplyPreviewBar(),
+          previewBar,
           _buildFormattingToolbar(),
           _buildInputField(inputPadding),
         ],
@@ -1221,7 +1476,7 @@ class ChatScreenState extends State<ChatScreen> {
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildReplyPreviewBar(),
+            previewBar,
             _buildFormattingToolbar(),
             _buildInputField(inputPadding),
           ],
@@ -1232,8 +1487,6 @@ class ChatScreenState extends State<ChatScreen> {
         return _buildSubscribeButton(inputPadding);
     }
   }
-
-  // ---------- AppBars ----------
 
   AppBar _buildNormalAppBar() {
     final String displayName = widget.titleOverride ??
@@ -1330,8 +1583,6 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Кнопка "вниз" с бейджем ----------
-
   int _unreadCount() {
     var n = 0;
     for (final m in widget.messages) {
@@ -1396,8 +1647,6 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Build ----------
-
   @override
   Widget build(BuildContext context) {
     final msgs = widget.messages;
@@ -1426,6 +1675,7 @@ class ChatScreenState extends State<ChatScreen> {
         msg.readMe,
         msg.readAny,
         msg.views,
+        msg.edited,
         isGroupOrChannel,
         maxBubbleWidth,
       ));
@@ -1441,10 +1691,22 @@ class ChatScreenState extends State<ChatScreen> {
     final appBar =
     _selectedIds.isEmpty ? _buildNormalAppBar() : _buildSelectionAppBar();
 
+    final canPop = _selectedIds.isEmpty &&
+        _mdDisabledForId == null &&
+        _editingMsgId == null;
+
     return PopScope(
-      canPop: _selectedIds.isEmpty,
+      canPop: canPop,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _selectedIds.isNotEmpty) {
+        if (didPop) return;
+        if (_editingMsgId != null) {
+          _cancelEdit();
+        } else if (_mdDisabledForId != null) {
+          setState(() {
+            _mdDisabledForId = null;
+            _selectedIds.clear();
+          });
+        } else if (_selectedIds.isNotEmpty) {
           _clearSelection();
         }
       },
@@ -1481,9 +1743,16 @@ class ChatScreenState extends State<ChatScreen> {
   void _sendMessage() {
     final text = widget.controller.text.trim();
     if (text.isEmpty) return;
+
+    if (_editingMsgId != null) {
+      final id = _editingMsgId!;
+      widget.onEditMessage?.call(id, text);
+      _cancelEdit();
+      return;
+    }
+
     widget.onSendMessage(text);
     widget.controller.clear();
-    // Прыгаем вниз — сообщение уже отправлено, эхо скоро придёт.
     _scrollToBottom();
   }
 

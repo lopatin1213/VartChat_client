@@ -37,6 +37,9 @@ class ChatMessage extends HiveObject {
   @HiveField(10)
   int? views;
 
+  @HiveField(11)
+  bool edited;
+
   ChatMessage({
     required this.id,
     required this.sender,
@@ -49,5 +52,6 @@ class ChatMessage extends HiveObject {
     this.readMe = false,
     this.readAny = false,
     this.views,
+    this.edited = false,
   });
 }

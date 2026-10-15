@@ -2,6 +2,14 @@ import 'dart:typed_data';
 import 'dart:convert';
 
 class Protocol {
+  // ==================== Версии протокола ====================
+  static const int MIN_PROTO_VERSION = 1;
+  static const int CURRENT_PROTO_VERSION = 2;
+
+  static const int HANDSHAKE_OK = 0x00;
+  static const int HANDSHAKE_REJECT = 0xFF;
+
+  // ==================== MSG_TYPES ====================
   static const int MSG_TYPE_USER = 0x01;
   static const int MSG_TYPE_SYSTEM = 0x02;
   static const int MSG_TYPE_COMMAND = 0x03;
@@ -9,6 +17,10 @@ class Protocol {
   static const int MSG_TYPE_DELETE = 0x05;
   static const int MSG_TYPE_LOGOUT = 0x06;
   static const int MSG_TYPE_READ = 0x07;
+  static const int MSG_TYPE_EDIT = 0x08;
+
+  static const int LOGOUT_TYPE_EXIT = 0;
+  static const int LOGOUT_TYPE_DELETE_ACCOUNT = 1;
 
   static const int MSG_KIND_PERSONAL = 1;
   static const int MSG_KIND_GROUP = 2;
@@ -49,9 +61,47 @@ class Protocol {
     return packet;
   }
 
-  /// MSG_TYPE_USER:
-  /// [0x01][sender][recipient][nonce 12][enc_len u32][encrypted]
-  /// [timestamp 8][msg_id 8][reply_to_id 8]
+  /// Тело первого пакета handshake: [proto_version u16 BE][pub_key 32] = 34 байта.
+  static Uint8List buildHandshakeHello(Uint8List publicKey) {
+    if (publicKey.length != 32) {
+      throw ArgumentError('Public key must be 32 bytes');
+    }
+    final packet = Uint8List(2 + 32);
+    packet[0] = (CURRENT_PROTO_VERSION >> 8) & 0xFF;
+    packet[1] = CURRENT_PROTO_VERSION & 0xFF;
+    packet.setAll(2, publicKey);
+    return packet;
+  }
+
+  /// Разбор ответа сервера на handshake.
+  /// OK:   [0x00][agreed u16 BE][pub_key 32]      — 35 байт
+  /// FAIL: [0xFF][reason_len u32 BE][reason utf8]
+  static ({bool ok, int? agreedVersion, Uint8List? serverKey, String? reason})
+  parseHandshakeResponse(Uint8List data) {
+    if (data.isEmpty) {
+      return (ok: false, agreedVersion: null, serverKey: null, reason: 'Пустой ответ');
+    }
+    if (data[0] == HANDSHAKE_OK) {
+      if (data.length < 3 + 32) {
+        return (ok: false, agreedVersion: null, serverKey: null, reason: 'Обрезан OK-ответ');
+      }
+      final agreed = (data[1] << 8) | data[2];
+      final key = data.sublist(3, 3 + 32);
+      return (ok: true, agreedVersion: agreed, serverKey: key, reason: null);
+    }
+    if (data[0] == HANDSHAKE_REJECT) {
+      if (data.length < 5) {
+        return (ok: false, agreedVersion: null, serverKey: null, reason: 'Несовместимая версия');
+      }
+      final len = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
+      final reason = len > 0 && data.length >= 5 + len
+          ? utf8.decode(data.sublist(5, 5 + len), allowMalformed: true)
+          : 'Несовместимая версия';
+      return (ok: false, agreedVersion: null, serverKey: null, reason: reason);
+    }
+    return (ok: false, agreedVersion: null, serverKey: null, reason: 'Неизвестный ответ');
+  }
+
   static Uint8List buildUserPacket(
       String sender,
       String recipient,
@@ -102,8 +152,29 @@ class Protocol {
     return packet;
   }
 
-  /// Разбор MSG_TYPE_USER.
-  /// Суффикс (опционально, для совместимости): [flag_me u8][flag_any u8] и [views u32] для каналов.
+  /// C→S 0x08 (EDIT): [0x08][msg_id i64 BE][kind u8][nonce 12][enc_len u32 BE][enc].
+  static Uint8List buildEditPacket(
+      int msgId,
+      int kind,
+      Uint8List nonce,
+      Uint8List encrypted,
+      ) {
+    final totalLen = 1 + 8 + 1 + 12 + 4 + encrypted.length;
+    final packet = Uint8List(totalLen);
+    var offset = 0;
+    packet[offset++] = MSG_TYPE_EDIT;
+    ByteData.sublistView(packet, offset, offset + 8)
+        .setInt64(0, msgId, Endian.big);
+    offset += 8;
+    packet[offset++] = kind;
+    packet.setAll(offset, nonce);
+    offset += 12;
+    _writeUint32(packet, offset, encrypted.length);
+    offset += 4;
+    packet.setAll(offset, encrypted);
+    return packet;
+  }
+
   static ({
   String sender,
   String recipient,
@@ -115,6 +186,7 @@ class Protocol {
   bool flagMe,
   bool flagAny,
   int? views,
+  bool edited,
   }) parseUserPacket(Uint8List payload) {
     var offset = 0;
     final senderLen = _readUint32(payload, offset);
@@ -165,6 +237,13 @@ class Protocol {
     if (payload.length >= offset + 4) {
       views = ByteData.sublistView(payload, offset, offset + 4)
           .getUint32(0, Endian.big);
+      offset += 4;
+    }
+
+    bool edited = false;
+    if (payload.length >= offset + 1) {
+      edited = payload[offset] != 0;
+      offset += 1;
     }
 
     return (
@@ -178,10 +257,10 @@ class Protocol {
     flagMe: flagMe,
     flagAny: flagAny,
     views: views,
+    edited: edited,
     );
   }
 
-  /// MSG_TYPE_READ: [0x07][count u16 BE][{kind u8, msg_id i64 BE} × N].
   static Uint8List buildReadPacket(List<({int kind, int msgId})> items) {
     final size = 1 + 2 + items.length * 9;
     final packet = Uint8List(size);
@@ -223,13 +302,27 @@ class Protocol {
     return packet;
   }
 
-  static Uint8List buildLogoutPacket(String token) {
+  /// C→S 0x06: [0x06][token_len u32 BE][token utf8][type u8?].
+  /// type == 0 (или нет байта) → exit; type == 1 → delete_account.
+  static Uint8List buildLogoutPacket(String token, {int type = 0}) {
     final tokenBytes = Uint8List.fromList(utf8.encode(token));
-    final packet = Uint8List(1 + 4 + tokenBytes.length);
+    final totalLen = (type == 0)
+        ? 1 + 4 + tokenBytes.length
+        : 1 + 4 + tokenBytes.length + 1;
+    final packet = Uint8List(totalLen);
     packet[0] = MSG_TYPE_LOGOUT;
     _writeUint32(packet, 1, tokenBytes.length);
     packet.setAll(5, tokenBytes);
+    if (type != 0) packet[5 + tokenBytes.length] = type;
     return packet;
+  }
+
+  /// S→C 0x06: [0x06][reason_len u32 BE][reason utf8].
+  static String parseLogoutFromServer(Uint8List payload) {
+    if (payload.length < 4) return 'Сессия завершена';
+    final len = _readUint32(payload, 0);
+    if (payload.length < 4 + len) return 'Сессия завершена';
+    return utf8.decode(payload.sublist(4, 4 + len), allowMalformed: true);
   }
 
   static Uint8List buildStringPacket(int type, String text) {

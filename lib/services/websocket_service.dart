@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/status.dart' as status;
 import 'crypto_service.dart';
@@ -22,6 +23,11 @@ class WebSocketService {
 
   String? _currentUsername;
   String? _fcmToken;
+  int? _agreedVersion;
+  int? get agreedVersion => _agreedVersion;
+
+  /// Вызывается, когда сервер присылает S→C 0x06 (принудительное завершение).
+  void Function(String reason)? onServerLogout;
 
   void setCredentials(String username, {String? fcmToken}) {
     _currentUsername = username;
@@ -43,7 +49,7 @@ class WebSocketService {
 
     var url = serverUrl.trim();
     if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
-      if (url.startsWith('localhost') | url.startsWith('127.0.0.1')) {
+      if (url.startsWith('localhost') || url.startsWith('127.0.0.1')) {
         url = 'ws://$url';
       } else {
         print('Используеться WebSocket over TLS');
@@ -51,12 +57,18 @@ class WebSocketService {
       }
     }
     final uri = Uri.parse(url);
-    _channel = IOWebSocketChannel.connect(
+    final channel = IOWebSocketChannel.connect(
       uri,
-      pingInterval: const Duration(seconds: 30),
+      pingInterval: const Duration(seconds: 5),
     );
+    _channel = channel;
 
-    _channel!.stream.listen(
+    channel.ready.catchError((e) {
+      _channel = null;
+      debugPrint('[WS] connect failed: $e');
+    });
+
+    channel.stream.listen(
           (data) {
         if (data is Uint8List) {
           _messageController?.add(data);
@@ -74,7 +86,13 @@ class WebSocketService {
     );
   }
 
-  Future<void> performHandshake() async {
+  /// Handshake с версионированием.
+  /// Отправляем: [proto u16][pub 32] = 34 байта.
+  /// Читаем:     [0x00][agreed u16][pub 32]   — OK (35 байт)
+  ///             [0xFF][reason_len u32][utf8] — отказ
+  ///             [pub 32]                     — старый сервер v1
+  /// Возвращает null при успехе, строку с причиной при отказе.
+  Future<String?> performHandshake() async {
     if (_channel == null || _messageController == null) {
       throw Exception('Not connected');
     }
@@ -84,25 +102,54 @@ class WebSocketService {
     final publicKey = keyPair.publicKey;
 
     await StorageService.savePrivateKey(privateKey);
-    _sendData(publicKey);
 
-    final serverPublicKey = await _messageController!.stream
-        .firstWhere(
-          (data) => data.length == 32,
-      orElse: () => throw Exception('No valid key received'),
-    )
-        .timeout(const Duration(seconds: 10), onTimeout: () {
+    // Слушаем ответ ДО отправки, чтобы не потерять его.
+    final firstResp = _messageController!.stream.firstWhere(
+          (data) =>
+      data.length == 32 ||
+          data.length >= 35 ||
+          (data.isNotEmpty && data[0] == Protocol.HANDSHAKE_REJECT),
+      orElse: () => throw Exception('No valid handshake response'),
+    ).timeout(const Duration(seconds: 10), onTimeout: () {
       throw Exception('Handshake timeout');
     });
 
+    _sendData(Protocol.buildHandshakeHello(publicKey));
+
+    final resp = await firstResp;
+
+    // Старый сервер v1: просто 32 байта публичного ключа, без версии.
+    if (resp.length == 32) {
+      debugPrint('[WS] Старый сервер (v1), без версии в ответе');
+      final serverPublicKey = resp;
+      final sharedSecret =
+      CryptoService.computeSharedSecret(privateKey, serverPublicKey);
+      _sessionKey = await CryptoService.deriveKey(sharedSecret);
+      _agreedVersion = 1;
+      await StorageService.saveSessionKey(_sessionKey!);
+      await StorageService.savePeerPublicKey(serverPublicKey);
+      return null;
+    }
+
+    // Новый сервер: разбираем.
+    final parsed = Protocol.parseHandshakeResponse(resp);
+    if (!parsed.ok) {
+      debugPrint('[WS] Handshake отклонён: ${parsed.reason}');
+      return parsed.reason ?? 'Несовместимая версия протокола';
+    }
+
+    _agreedVersion = parsed.agreedVersion;
+    final serverPublicKey = parsed.serverKey!;
+    debugPrint('[WS] Handshake OK, протокол v$_agreedVersion');
+
     final sharedSecret =
     CryptoService.computeSharedSecret(privateKey, serverPublicKey);
-    final key = await CryptoService.deriveKey(sharedSecret);
-    print('[WS] Handshake: ключ сессии = ${CryptoService.bytesToHex(key)}');
-    _sessionKey = key;
+    _sessionKey = await CryptoService.deriveKey(sharedSecret);
+    print('[WS] Handshake: ключ сессии = ${CryptoService.bytesToHex(_sessionKey!)}');
 
-    await StorageService.saveSessionKey(key);
+    await StorageService.saveSessionKey(_sessionKey!);
     await StorageService.savePeerPublicKey(serverPublicKey);
+    return null;
   }
 
   Future<void> sendAuth(
@@ -141,11 +188,17 @@ class WebSocketService {
     _sendData(packet);
   }
 
-  Future<void> sendLogout(String token) async {
+  /// C→S 0x06. type == 0 → exit, type == 1 → delete_account.
+  Future<void> sendLogout(String token, {int type = 0}) async {
     if (_channel == null) throw Exception('Not connected');
-    final packet = Protocol.buildLogoutPacket(token);
+    final packet = Protocol.buildLogoutPacket(token, type: type);
     _sendData(packet);
     await Future.delayed(const Duration(milliseconds: 150));
+  }
+
+  /// Специальный случай logout — удаление аккаунта.
+  Future<void> sendDeleteAccount(String token) async {
+    await sendLogout(token, type: Protocol.LOGOUT_TYPE_DELETE_ACCOUNT);
   }
 
   Future<void> sendEncryptedMessage(String recipient, String text,
@@ -172,13 +225,28 @@ class WebSocketService {
     _sendData(packet);
   }
 
+  /// C→S 0x08 (EDIT). Шифрует newText сессионным ключом.
+  Future<void> sendEditMessage(int msgId, int kind, String newText) async {
+    if (_channel == null || _sessionKey == null) {
+      throw Exception('Not ready');
+    }
+    final plaintext = Uint8List.fromList(utf8.encode(newText));
+    final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
+    final packet = Protocol.buildEditPacket(
+      msgId,
+      kind,
+      result.nonce,
+      result.ciphertext,
+    );
+    _sendData(packet);
+  }
+
   Future<void> sendDeleteMessage(int msgId, int kind, {int type = 0}) async {
     if (_channel == null) throw Exception('Not connected');
     final packet = Protocol.buildDeletePacket(msgId, kind, type: type);
     _sendData(packet);
   }
 
-  /// 0x07: пометить сообщения прочитанными.
   Future<void> sendRead(List<({int kind, int msgId})> items) async {
     if (_channel == null) throw Exception('Not connected');
     if (items.isEmpty) return;
@@ -187,9 +255,16 @@ class WebSocketService {
   }
 
   Future<void> sendCommand(String cmd) async {
-    if (_channel == null) throw Exception('Not connected');
-    final packet = Protocol.buildStringPacket(Protocol.MSG_TYPE_COMMAND, cmd);
-    _sendData(packet);
+    if (_channel == null) {
+      print('[WS] sendCommand пропущена (нет соединения): $cmd');
+      return;
+    }
+    try {
+      final packet = Protocol.buildStringPacket(Protocol.MSG_TYPE_COMMAND, cmd);
+      _sendData(packet);
+    } catch (e) {
+      print('[WS] sendCommand error: $e');
+    }
   }
 
   Future<void> disconnect() async {
@@ -205,7 +280,10 @@ class WebSocketService {
     if (server == null) return;
     await disconnect();
     await connect(server);
-    await performHandshake();
+    final err = await performHandshake();
+    if (err != null) {
+      throw Exception('Несовместимая версия протокола: $err');
+    }
 
     final token = await StorageService.getToken();
     if (token != null) {

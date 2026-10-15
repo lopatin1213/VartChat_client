@@ -95,7 +95,19 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       if (!_wsService.isConnected) {
         await _wsService.connect(_serverAddress);
-        await _wsService.performHandshake();
+        final hsErr = await _wsService.performHandshake();
+        if (hsErr != null) {
+          // Сервер отверг: несовместимая версия.
+          await _wsService.disconnect();
+          if (mounted) {
+            setState(() {
+              _errorMessage = hsErr;
+              _isLoading = false;
+            });
+            _showVersionDialog(hsErr);
+          }
+          return;
+        }
         _subscription?.cancel();
         _subscription = _wsService.onMessage.listen(_handleIncomingMessage);
         await StorageService.saveServer(_serverAddress);
@@ -150,6 +162,26 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  void _showVersionDialog(String reason) {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('Несовместимая версия'),
+        content: Text(
+          'Сервер сообщил: $reason\n\n'
+              'Обновите приложение, чтобы продолжить.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Понятно'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _handleIncomingMessage(Uint8List data) {
     print('[UI] _handleIncomingMessage: получен пакет, длина=${data.length}');
     try {
@@ -157,6 +189,23 @@ class _LoginScreenState extends State<LoginScreen> {
       final type = parsed.type;
       final payload = parsed.payload;
       print('[UI] тип=0x${type.toRadixString(16)}');
+
+      // S→C 0x06 — принудительное завершение сессии.
+      if (type == Protocol.MSG_TYPE_LOGOUT) {
+        final reason = Protocol.parseLogoutFromServer(payload);
+        print('[UI] Сервер завершил сессию: $reason');
+        _subscription?.cancel();
+        _subscription = null;
+        StorageService.clearAll();
+        DatabaseService.clearData();
+        _wsService.disconnect();
+        if (!mounted) return;
+        setState(() {
+          _errorMessage = reason;
+          _isLoading = false;
+        });
+        return;
+      }
 
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
@@ -187,7 +236,8 @@ class _LoginScreenState extends State<LoginScreen> {
             final userId = parts[1];
             final token = parts[2];
             final username = parts[3];
-            print('[UI] Аутентификация успешна! userId=$userId, token=$token, username=$username');
+            print(
+                '[UI] Аутентификация успешна! userId=$userId, token=$token, username=$username');
             _currentUsername = username;
             _wsService.setCredentials(username, fcmToken: FcmService.token);
             StorageService.saveToken(token);
@@ -195,7 +245,8 @@ class _LoginScreenState extends State<LoginScreen> {
             StorageService.saveUserId(userId);
 
             Future.delayed(const Duration(milliseconds: 500), () async {
-              print('[UI] Задержка завершена. Всего исторических сообщений: ${_historyMessages.length}');
+              print(
+                  '[UI] Задержка завершена. Всего исторических сообщений: ${_historyMessages.length}');
               _subscription?.cancel();
               _subscription = null;
               await DatabaseService.clearData();
@@ -219,7 +270,6 @@ class _LoginScreenState extends State<LoginScreen> {
           }
         }
       } else if (type == Protocol.MSG_TYPE_USER) {
-        print('[UI] ==== ПОЛУЧЕНО ПОЛЬЗОВАТЕЛЬСКОЕ СООБЩЕНИЕ (история) ====');
         final parsedUser = Protocol.parseUserPacket(payload);
         final sender = parsedUser.sender;
         final recipient = parsedUser.recipient;
@@ -254,15 +304,12 @@ class _LoginScreenState extends State<LoginScreen> {
               views: views,
             );
             _historyMessages.add(message);
-            print('[UI] История сохранена, всего сообщений: ${_historyMessages.length}');
           }).catchError((e) {
             print('[UI] Ошибка расшифровки: $e');
           });
         } catch (e) {
           print('[UI] Ошибка расшифровки: $e');
         }
-      } else {
-        print('[UI] Неизвестный тип сообщения: ${type.toRadixString(16)}');
       }
     } catch (e) {
       print('[UI] Ошибка обработки входящего сообщения: $e');
@@ -277,7 +324,8 @@ class _LoginScreenState extends State<LoginScreen> {
         title: const Text('Адрес сервера'),
         content: TextField(
           controller: controller,
-          decoration: const InputDecoration(hintText: 'например, vartchat.alwaysdata.net'),
+          decoration: const InputDecoration(
+              hintText: 'например, vartchat.alwaysdata.net'),
         ),
         actions: [
           TextButton(

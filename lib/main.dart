@@ -49,7 +49,7 @@ Future<void> _bootstrap() async {
 
   final prefs = await SharedPreferences.getInstance();
   const schemaKey = 'messages_schema_version';
-  const currentSchema = 4;
+  const currentSchema = 5;
   if ((prefs.getInt(schemaKey) ?? 1) < currentSchema) {
     await Hive.deleteBoxFromDisk('messages');
     await prefs.setInt(schemaKey, currentSchema);

@@ -14,7 +14,6 @@ import 'login_screen.dart';
 
 enum ViewMode { chats, contacts, groups, channels }
 
-/// Отложенное сообщение, ждёт восстановления связи.
 typedef _OutboxItem = ({
 String chatKey,
 String text,
@@ -80,7 +79,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   final Map<String, bool> _fullyLoaded = {};
   final Set<String> _historyLoading = {};
 
-  /// Сообщения, которые не удалось отправить — ждут восстановления связи.
   final List<_OutboxItem> _outbox = [];
 
   static const List<int> _reconnectDelays = [1, 5, 10, 30, 60];
@@ -261,13 +259,11 @@ class _ChatListScreenState extends State<ChatListScreen>
       readMe: msg.readMe,
       readAny: msg.readAny,
       views: msg.views,
+      edited: msg.edited,
       ));
     }
   }
 
-  /// Merge нового/обновлённого сообщения.
-  /// Если id > 0 и isMe — сначала убираем локальную заглушку (id == 0,
-  /// совпадающая по тексту и близкому времени).
   void _mergeMessage(
       int id,
       String sender,
@@ -279,11 +275,11 @@ class _ChatListScreenState extends State<ChatListScreen>
       bool readMe,
       bool readAny,
       int? views,
+      bool edited,
       ) {
     final chatKey = _chatKeyFor(sender, recipient, isMe);
     final list = _messages.putIfAbsent(chatKey, () => []);
 
-    // Серверное эхо нашего сообщения — убираем локальную заглушку.
     if (id > 0 && isMe) {
       final localIdx = list.indexWhere((m) =>
       m.id == 0 &&
@@ -300,16 +296,20 @@ class _ChatListScreenState extends State<ChatListScreen>
     ChatMsg merged;
     if (idx >= 0) {
       final old = list[idx];
+      // Если пришёл edit — перезаписываем текст.
+      final newText = edited ? text : old.text;
+      final newEdited = old.edited || edited;
       merged = (
       id: old.id,
       sender: old.sender,
-      text: old.text,
+      text: newText,
       isMe: old.isMe,
       timestamp: old.timestamp,
       replyToId: old.replyToId != 0 ? old.replyToId : replyToId,
       readMe: old.readMe || readMe,
       readAny: old.readAny || readAny,
       views: views ?? old.views,
+      edited: newEdited,
       );
       list[idx] = merged;
     } else {
@@ -323,12 +323,12 @@ class _ChatListScreenState extends State<ChatListScreen>
       readMe: readMe,
       readAny: readAny,
       views: views,
+      edited: edited,
       );
       list.add(merged);
       list.sort((a, b) => a.timestamp.compareTo(b.timestamp));
     }
 
-    // Локальные заглушки (id == 0) в Hive не сохраняем — они эфемерные.
     if (merged.id == 0) return;
 
     final message = ChatMessage(
@@ -342,11 +342,10 @@ class _ChatListScreenState extends State<ChatListScreen>
       readMe: merged.readMe,
       readAny: merged.readAny,
       views: merged.views,
+      edited: merged.edited,
     );
     DatabaseService.saveMessage(message);
   }
-
-  // ---------- 0x07 (READ) ----------
 
   void _sendReadForChat(String chatKey) {
     final msgs = _messages[chatKey];
@@ -371,11 +370,9 @@ class _ChatListScreenState extends State<ChatListScreen>
       print('[READ] Ошибка отправки: $e');
       return;
     }
-
     _markLocalRead(chatKey, ids);
   }
 
-  /// Вызывается из ChatScreen когда пользователь внизу и появились новые.
   void _markRead(String chatKey, List<int> msgIds) {
     if (msgIds.isEmpty) return;
     final kind = _kindForChat(chatKey);
@@ -389,7 +386,6 @@ class _ChatListScreenState extends State<ChatListScreen>
     _markLocalRead(chatKey, msgIds);
   }
 
-  /// Локально выставить readMe=true и сохранить в Hive.
   void _markLocalRead(String chatKey, List<int> ids) {
     if (!mounted) return;
     final list = _messages[chatKey];
@@ -411,6 +407,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         readMe: true,
         readAny: m.readAny,
         views: m.views,
+        edited: m.edited,
         );
         list[idx] = updated;
         DatabaseService.saveMessage(ChatMessage(
@@ -424,6 +421,7 @@ class _ChatListScreenState extends State<ChatListScreen>
           readMe: true,
           readAny: m.readAny,
           views: m.views,
+          edited: m.edited,
         ));
       }
     });
@@ -452,6 +450,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             readMe: m.readMe,
             readAny: true,
             views: m.views,
+            edited: m.edited,
             );
             DatabaseService.saveMessage(ChatMessage(
               id: m.id,
@@ -464,14 +463,13 @@ class _ChatListScreenState extends State<ChatListScreen>
               readMe: m.readMe,
               readAny: true,
               views: m.views,
+              edited: m.edited,
             ));
           }
         }
       }
     });
   }
-
-  // ---------- /getmsg ----------
 
   void _scheduleGetMsg(int kind, int msgId) {
     if (msgId == 0) return;
@@ -506,8 +504,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       }
     }
   }
-
-  // ---------- Подписка / реконнект ----------
 
   void _subscribeToMessages() {
     _subscription?.cancel();
@@ -556,11 +552,11 @@ class _ChatListScreenState extends State<ChatListScreen>
     if (_reconnectInProgress) return;
 
     _reconnectInProgress = true;
+    print('[WS] Начинаю реконнект...');
     try {
       await widget.wsService.reconnect();
       _reconnectAttempts = 0;
 
-      // НЕ чистим Hive и _messages — дедуп по msgId в _mergeMessage.
       setState(() {
         _fullyLoaded.clear();
         _historyLoading.clear();
@@ -581,10 +577,8 @@ class _ChatListScreenState extends State<ChatListScreen>
         setState(() => _isConnecting = false);
       }
 
-      // Разгружаем очередь сообщений, что копились в оффлайне.
       _flushOutbox();
 
-      // Если чат открыт — перезапросим историю.
       final open = _selectedChat;
       if (open != null) {
         _fullyLoaded[open] = false;
@@ -602,13 +596,32 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
   }
 
-  // ---------- Обработка входящих ----------
-
   void _handleIncomingMessage(Uint8List data) {
     try {
       final parsed = Protocol.parsePacket(data);
       final type = parsed.type;
       final payload = parsed.payload;
+
+      // S→C 0x06 — принудительное завершение сессии.
+      if (type == Protocol.MSG_TYPE_LOGOUT) {
+        final reason = Protocol.parseLogoutFromServer(payload);
+        print('[ChatList] Сервер завершил сессию: $reason');
+        _reconnectTimer?.cancel();
+        _reconnectTimer = null;
+        _periodicTimer?.cancel();
+        _periodicTimer = null;
+        _subscription?.cancel();
+        _subscription = null;
+        StorageService.clearAll();
+        DatabaseService.clearData();
+        widget.wsService.disconnect();
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+        );
+        return;
+      }
 
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
@@ -836,6 +849,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         final flagMe = parsedUser.flagMe;
         final flagAny = parsedUser.flagAny;
         final views = parsedUser.views;
+        final edited = parsedUser.edited;
 
         final key = widget.wsService.sessionKey;
         if (key == null) return;
@@ -846,18 +860,8 @@ class _ChatListScreenState extends State<ChatListScreen>
           if (!mounted) return;
 
           setState(() {
-            _mergeMessage(
-              msgId,
-              sender,
-              recipient,
-              text,
-              isMe,
-              timestamp,
-              replyToId,
-              flagMe,
-              flagAny,
-              views,
-            );
+            _mergeMessage(msgId, sender, recipient, text, isMe, timestamp,
+                replyToId, flagMe, flagAny, views, edited);
 
             if (msgId != 0) {
               _replyCache[msgId] =
@@ -865,11 +869,10 @@ class _ChatListScreenState extends State<ChatListScreen>
               _requestedReplyIds.remove(msgId);
             }
 
-            // Наше сообщение подтверждено сервером — убираем из outbox.
-            if (isMe && msgId > 0) {
+            if (isMe && msgId > 0 && !edited) {
               final chatKey = _chatKeyFor(sender, recipient, isMe);
               final idx = _outbox.indexWhere((it) =>
-                  it.chatKey == chatKey &&
+              it.chatKey == chatKey &&
                   it.text == text &&
                   (it.timestamp - timestamp).abs() < 10000);
               if (idx >= 0) {
@@ -913,6 +916,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                 readMe: m.readMe,
                 readAny: m.readAny,
                 views: m.views,
+                edited: m.edited,
                 );
               }
             }
@@ -926,8 +930,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       print('Ошибка обработки пакета: $e');
     }
   }
-
-  // ---------- История ----------
 
   void _requestHistoryInitial(String chatKey) {
     if (_fullyLoaded[chatKey] == true) return;
@@ -970,8 +972,6 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
   }
 
-  // ---------- Удаление ----------
-
   void _deleteMessage(String chatKey, int msgId) {
     final kind = _kindForChat(chatKey);
     try {
@@ -997,33 +997,19 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
   }
 
-  // ---------- Отправка ----------
-
   void _sendMessage(String chatKey, String text) {
     final replyToId = _replyToMsgId[chatKey] ?? 0;
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    // Локально показываем сообщение сразу (часы).
     setState(() {
-      _mergeMessage(
-        0,
-        widget.username,
-        chatKey,
-        text,
-        true,
-        now,
-        replyToId,
-        true,
-        false,
-        null,
-      );
+      _mergeMessage(0, widget.username, chatKey, text, true, now, replyToId,
+          true, false, null, false);
       if (replyToId != 0) {
         _replyToMsgId.remove(chatKey);
       }
     });
     _getController(chatKey).clear();
 
-    // Всегда в outbox. Уйдёт из него только когда придёт эхо.
     final item = (
     chatKey: chatKey,
     text: text,
@@ -1032,6 +1018,56 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
     _outbox.add(item);
     _trySendOutboxItem(item);
+  }
+
+  void _editMessage(String chatKey, int msgId, String newText) {
+    if (msgId == 0) return;
+    final list = _messages[chatKey];
+    if (list == null) return;
+    final idx = list.indexWhere((m) => m.id == msgId);
+    if (idx < 0) return;
+    final old = list[idx];
+    if (old.text == newText) return;
+
+    final kind = _kindForChat(chatKey);
+
+    // Оптимистичное обновление UI + Hive.
+    if (!mounted) return;
+    setState(() {
+      final updated = (
+      id: old.id,
+      sender: old.sender,
+      text: newText,
+      isMe: old.isMe,
+      timestamp: old.timestamp,
+      replyToId: old.replyToId,
+      readMe: old.readMe,
+      readAny: old.readAny,
+      views: old.views,
+      edited: true,
+      );
+      list[idx] = updated;
+      DatabaseService.saveMessage(ChatMessage(
+        id: old.id,
+        sender: old.sender,
+        recipient: _recipientFor(old, chatKey),
+        text: newText,
+        isMe: old.isMe,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(old.timestamp),
+        replyToId: old.replyToId,
+        readMe: old.readMe,
+        readAny: old.readAny,
+        views: old.views,
+        edited: true,
+      ));
+    });
+
+    try {
+      widget.wsService.sendEditMessage(msgId, kind, newText);
+      print('[EDIT] Отправлено: msgId=$msgId kind=$kind');
+    } catch (e) {
+      print('[EDIT] Ошибка отправки: $e');
+    }
   }
 
   void _trySendOutboxItem(_OutboxItem item) {
@@ -1065,8 +1101,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   void _cancelReply(String chatKey) {
     setState(() => _replyToMsgId.remove(chatKey));
   }
-
-  // ---------- Прочее ----------
 
   String _displayNameFor(String username) {
     for (final c in _contacts) {
@@ -1119,7 +1153,87 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
-  // ---------- Диалоги ----------
+  // ==================== Удаление аккаунта ====================
+
+  Future<void> _showDeleteAccountDialog() async {
+    final step1 = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Удалить аккаунт?'),
+        content: const Text(
+          'Аккаунт и все ваши сообщения будут удалены безвозвратно '
+              'через 7 дней. Сейчас вы будете разлогинены на всех устройствах.\n\n'
+              'Вы точно хотите удалить аккаунт?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (step1 != true) return;
+    if (!mounted) return;
+
+    final passCtrl = TextEditingController();
+    final step2 = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Подтверждение'),
+        content: TextField(
+          controller: passCtrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Пароль'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Подтвердить'),
+          ),
+        ],
+      ),
+    );
+    passCtrl.dispose();
+    if (step2 != true) return;
+    if (!mounted) return;
+
+    // Отправляем delete_account.
+    try {
+      final token = await StorageService.getToken();
+      if (token != null) {
+        await widget.wsService.sendDeleteAccount(token);
+      }
+      // Ждём немного — сервер пришлёт S→C 0x06 «Аккаунт удалён».
+      await Future.delayed(const Duration(milliseconds: 400));
+    } catch (e) {
+      print('[UI] Ошибка отправки delete_account: $e');
+    }
+
+    // На всякий случай — локальный сброс.
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _outbox.clear();
+    await widget.wsService.resetSession();
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+    );
+  }
+
+  // ==================== Диалоги ====================
 
   void _showCreateGroupDialog() {
     final controller = TextEditingController();
@@ -1480,6 +1594,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       onSendMessage: (text) => _sendMessage(chatKey, text),
       onDeleteMessage: (msgId) => _deleteMessage(chatKey, msgId),
       onHideForMe: (msgId) => _hideMessageForMe(chatKey, msgId),
+      onEditMessage: (msgId, newText) => _editMessage(chatKey, msgId, newText),
       onMarkRead: (ids) => _markRead(chatKey, ids),
       resolveDisplayName: _resolveDisplayName,
       isWide: isWide,
@@ -1596,6 +1711,17 @@ class _ChatListScreenState extends State<ChatListScreen>
             onTap: () {
               Navigator.pop(context);
               _logout();
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_forever, color: Colors.red),
+            title: const Text(
+              'Удалить аккаунт',
+              style: TextStyle(color: Colors.red),
+            ),
+            onTap: () {
+              Navigator.pop(context);
+              _showDeleteAccountDialog();
             },
           ),
         ],

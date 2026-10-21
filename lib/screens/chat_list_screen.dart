@@ -45,6 +45,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   List<({String phone, String username, String displayName})> _contacts = [];
   List<String> _groups = [];
+  final Map<String, bool> _groupMembership = {}; // <--- Статус участия в группах
   List<String> _channels = [];
 
   final Set<String> _onlineUsers = {};
@@ -237,12 +238,14 @@ class _ChatListScreenState extends State<ChatListScreen>
 
     _reconnectAttempts = 0;
     _reconnectTimer?.cancel();
-    _reconnectTimer = null;
     _isConnecting = false;
 
-    // ВСЕГДА переподключаемся при возврате из фона
-    _performReconnect();
+    // Та самая рабочая проверка
+    if (!widget.wsService.isConnected) {
+      _scheduleReconnect();
+    }
   }
+
   Future<void> _loadServerAddress() async {
     final addr = await StorageService.getServer();
     if (addr != null) setState(() => _serverAddress = addr);
@@ -289,7 +292,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
     int idx = -1;
 
-    // 1. СНАЧАЛА ищем локальное сообщение по clientMsgId (если он есть)
+    // 1. СНАЧАЛА ищем локальное сообщение по clientMsgId
     if (clientMsgId != 0) {
       idx = list.indexWhere((m) => m.clientMsgId == clientMsgId);
     }
@@ -496,7 +499,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   void _scheduleReconnect() {
-    if (!mounted || _reconnectTimer != null || _isConnecting) return;
+    if (!mounted || _reconnectTimer != null || _isConnecting || _reconnectInProgress) return;
     final delaySeconds = _getDelayForAttempt(_reconnectAttempts);
     setState(() => _isConnecting = true);
 
@@ -509,6 +512,11 @@ class _ChatListScreenState extends State<ChatListScreen>
   Future<void> _performReconnect() async {
     if (!mounted || _reconnectInProgress) return;
     _reconnectInProgress = true;
+
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _subscription?.cancel();
+    _subscription = null;
 
     try {
       await widget.wsService.reconnect();
@@ -526,7 +534,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       });
       _getMsgTimer?.cancel();
 
-      // 1. СНАЧАЛА подписываемся на стрим!
+      // 1. СНАЧАЛА подписываемся на стрим
       _subscribeToMessages();
 
       // 2. И ТОЛЬКО ПОТОМ шлем токен
@@ -539,7 +547,9 @@ class _ChatListScreenState extends State<ChatListScreen>
       }
 
       _refreshChats();
+
       if (mounted) setState(() => _isConnecting = false);
+
       _flushOutbox();
 
       if (_selectedChat != null) {
@@ -548,6 +558,10 @@ class _ChatListScreenState extends State<ChatListScreen>
         _requestHistoryInitial(_selectedChat!);
       }
     } catch (e) {
+      if (e.toString().contains('Токен не найден')) {
+        _logout();
+        return;
+      }
       _reconnectAttempts++;
       if (mounted) setState(() => _isConnecting = false);
       _scheduleReconnect();
@@ -603,7 +617,13 @@ class _ChatListScreenState extends State<ChatListScreen>
 
         if (text.contains('Неверный пароль')) {
           if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Неверный пароль — аккаунт не удалён')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Неверный пароль — аккаунт не удалён', style: TextStyle(color: Colors.white)),
+              backgroundColor: Colors.red,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
           return;
         }
 
@@ -672,14 +692,30 @@ class _ChatListScreenState extends State<ChatListScreen>
         }
 
         if (text.startsWith('[Система] Все группы') || text.startsWith('[Система] Ваши группы:')) {
-          String groupsPart = text.startsWith('[Система] Все группы')
-              ? (text.contains(':') ? text.substring(text.indexOf(':') + 1).trim() : '')
-              : text.replaceFirst('[Система] Ваши группы:', '').trim();
-          if (groupsPart.isEmpty || groupsPart == 'Вы не состоите ни в одной группе' || groupsPart == 'Нет ни одной группы') {
-            setState(() => _groups = []);
+          if (!mounted) return;
+          String groupsPart;
+          if (text.startsWith('[Система] Все группы')) {
+            final colonIdx = text.indexOf(':');
+            groupsPart = colonIdx != -1 ? text.substring(colonIdx + 1).trim() : '';
           } else {
-            final names = groupsPart.split(',').map((s) => s.trim().split('|').first).where((s) => s.isNotEmpty).toList();
-            setState(() => _groups = names);
+            groupsPart = text.replaceFirst('[Система] Ваши группы:', '').trim();
+          }
+          if (groupsPart.isEmpty || groupsPart == 'Вы не состоите ни в одной группе' || groupsPart == 'Нет ни одной группы') {
+            setState(() { _groups = []; _groupMembership.clear(); });
+          } else {
+            final items = groupsPart.split(',').map((s) => s.trim()).toList();
+            final names = <String>[];
+            final memberships = <String, bool>{};
+            for (final item in items) {
+              final parts = item.split('|');
+              final name = parts[0].trim();
+              if (name.isNotEmpty) {
+                names.add(name);
+                final isMember = parts.length > 2 ? parts[2].trim() == '1' : true;
+                memberships[name] = isMember;
+              }
+            }
+            setState(() { _groups = names; _groupMembership..clear()..addAll(memberships); });
           }
           if (_isConnecting && mounted) setState(() => _isConnecting = false);
           return;
@@ -688,7 +724,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         if (text.startsWith('[Система] Все каналы') || text.startsWith('[Система] Ваши каналы:')) {
           final isNewFormat = text.startsWith('[Система] Все каналы');
           String channelsPart = isNewFormat
-              ? (text.contains(':') ? text.substring(text.indexOf(':') + 1).trim() : '')
+              ? (text.indexOf(':') != -1 ? text.substring(text.indexOf(':') + 1).trim() : '')
               : text.replaceFirst('[Система] Ваши каналы:', '').trim();
           if (channelsPart.isEmpty || channelsPart == 'Вы не подписаны ни на один канал' || channelsPart == 'Нет ни одного канала') {
             setState(() { _channels = []; _channelInfo = {}; });
@@ -823,6 +859,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   void _deleteMessage(String chatKey, int msgId) {
+    if (msgId == 0) return;
     try {
       widget.wsService.sendDeleteMessage(msgId, _kindForChat(chatKey), type: 0);
     } catch (e) {
@@ -945,6 +982,17 @@ class _ChatListScreenState extends State<ChatListScreen>
     widget.wsService.sendCommand('/subscribe $channelName');
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Подписка на канал "$channelName"...')));
     Future.delayed(const Duration(seconds: 1), () => mounted ? _refreshChats() : null);
+  }
+
+  void _joinGroup(String groupName) {
+    widget.wsService.sendCommand('/joingroup $groupName');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Вступление в группу "$groupName"...')),
+    );
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) _refreshChats();
+    });
   }
 
   Future<void> _logout() async {
@@ -1130,6 +1178,8 @@ class _ChatListScreenState extends State<ChatListScreen>
           itemCount: _groups.length,
           itemBuilder: (context, index) {
             final groupName = _groups[index];
+            final isMember = _groupMembership[groupName] ?? false;
+
             return ListTile(
               leading: const Icon(Icons.group),
               title: Text(groupName),
@@ -1140,13 +1190,16 @@ class _ChatListScreenState extends State<ChatListScreen>
                 setState(() => _currentView = ViewMode.chats);
                 _openChat(chatKey);
               },
-              trailing: IconButton(
+              // Никаких текстовых кнопок, только иконка выхода для тех, кто в группе
+              trailing: isMember
+                  ? IconButton(
                 icon: const Icon(Icons.exit_to_app),
                 onPressed: () {
                   widget.wsService.sendCommand('/leavegroup $groupName');
                   Future.delayed(const Duration(seconds: 1), () => mounted ? _refreshChats() : null);
                 },
-              ),
+              )
+                  : null,
             );
           },
         );
@@ -1276,6 +1329,11 @@ class _ChatListScreenState extends State<ChatListScreen>
   Widget _buildChatScreen(String chatKey, {required bool isWide}) {
     final isChannel = chatKey.startsWith('&');
     final isGroup = chatKey.startsWith('#');
+
+    // Проверяем, состоим ли мы в группе
+    final groupName = isGroup ? chatKey.substring(1) : null;
+    final isMember = isGroup ? (_groupMembership[groupName] ?? true) : true;
+
     final role = isChannel ? _getChannelRole(chatKey) : null;
     final channelName = isChannel ? chatKey.substring(1) : null;
     final activeReply = _getReplyData(chatKey);
@@ -1302,6 +1360,10 @@ class _ChatListScreenState extends State<ChatListScreen>
       lastSeen: _lastSeen[chatKey],
       channelRole: role,
       onSubscribe: channelName != null ? () => _subscribeToChannel(channelName) : null,
+
+      isGroupMember: isMember,
+      onJoinGroup: groupName != null ? () => _joinGroup(groupName) : null,
+
       activeReply: activeReply,
       onSetReply: (msgId) => _setReplyTo(chatKey, msgId),
       onCancelReply: () => _cancelReply(chatKey),

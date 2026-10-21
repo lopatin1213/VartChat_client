@@ -9,7 +9,7 @@ import '../services/websocket_service.dart';
 
 typedef ChatMsg = ({
 int id,
-int clientMsgId, // <--- ДОБАВЛЕНО СЮДА
+int clientMsgId,
 String sender,
 String text,
 bool isMe,
@@ -49,6 +49,10 @@ class ChatScreen extends StatefulWidget {
 
   final ChannelRole? channelRole;
   final VoidCallback? onSubscribe;
+
+  final bool isGroupMember;
+  final VoidCallback? onJoinGroup;
+
   final TextEditingController controller;
   final FocusNode? focusNode;
 
@@ -79,6 +83,8 @@ class ChatScreen extends StatefulWidget {
     this.lastSeen,
     this.channelRole,
     this.onSubscribe,
+    this.isGroupMember = true,
+    this.onJoinGroup,
     this.activeReply,
     this.onSetReply,
     this.onCancelReply,
@@ -93,7 +99,7 @@ class ChatScreenState extends State<ChatScreen> {
   Timer? _presenceTimer;
 
   final Set<int> _selectedIds = <int>{};
-  final Map<int, GlobalKey> _msgKeys = {};
+  final Map<String, GlobalKey> _msgKeys = {};
   int? _highlightedMsgId;
 
   int? _mdDisabledForId;
@@ -371,7 +377,6 @@ class ChatScreenState extends State<ChatScreen> {
 
     String newTextBlock;
 
-    // Если это нумерованный список ("1. "), делаем автоинкремент
     if (prefix == '1. ') {
       final newLines = <String>[];
       for (int i = 0; i < lines.length; i++) {
@@ -379,13 +384,11 @@ class ChatScreenState extends State<ChatScreen> {
       }
       newTextBlock = newLines.join('\n');
     } else {
-      // Для цитат ("> ") и маркеров ("- ") просто ставим префикс
       newTextBlock = lines.map((line) => '$prefix$line').join('\n');
     }
 
     widget.controller.text = before + newTextBlock + after;
 
-    // Оставляем выделение на измененном тексте
     widget.controller.selection = TextSelection(
       baseOffset: sel.start,
       extentOffset: sel.start + newTextBlock.length,
@@ -491,11 +494,8 @@ class ChatScreenState extends State<ChatScreen> {
   void _enterSelection(int msgId) => setState(() => _selectedIds.add(msgId));
   void _toggleSelection(int msgId) {
     setState(() {
-      if (_selectedIds.contains(msgId)) {
-        _selectedIds.remove(msgId);
-      } else {
-        _selectedIds.add(msgId);
-      }
+      if (_selectedIds.contains(msgId)) _selectedIds.remove(msgId);
+      else _selectedIds.add(msgId);
     });
   }
 
@@ -518,9 +518,9 @@ class ChatScreenState extends State<ChatScreen> {
       if (!_selectedIds.contains(msg.id)) continue;
 
       final label = _senderLabel(msg.sender);
-      final isAdjacent = prevIdx != null && i == prevIdx + 1;
+      final isAdjacent = prevIdx != null && i == prevIdx! + 1;
       final sameSender = prevLabel == label;
-      final withinMinute = prevTs != null && (msg.timestamp - prevTs).abs() <= 60000;
+      final withinMinute = prevTs != null && (msg.timestamp - prevTs!).abs() <= 60000;
       final continueBlock = isAdjacent && sameSender && withinMinute;
 
       if (continueBlock) {
@@ -617,7 +617,7 @@ class ChatScreenState extends State<ChatScreen> {
     if (msgId != 0 && _canEdit(isMe)) {
       items.add(const PopupMenuItem<String>(value: 'edit', height: 44, child: Row(children: [Icon(Icons.edit, size: 20), SizedBox(width: 12), Text('Редактировать')])));
     }
-    if (_canDelete(isMe)) {
+    if (msgId != 0 && _canDelete(isMe)) {
       items.add(const PopupMenuItem<String>(value: 'delete', height: 44, child: Row(children: [Icon(Icons.delete, size: 20, color: Colors.red), SizedBox(width: 12), Text('Удалить у всех', style: TextStyle(color: Colors.red))])));
     }
     if (_canHideForMe()) {
@@ -693,7 +693,7 @@ class ChatScreenState extends State<ChatScreen> {
       if (mounted && _highlightedMsgId == targetId) setState(() => _highlightedMsgId = null);
     });
 
-    final key = _msgKeys.putIfAbsent(targetId, () => GlobalKey());
+    final key = _msgKeys.putIfAbsent('msg_$targetId', () => GlobalKey());
     if (key.currentContext != null) {
       try {
         await Scrollable.ensureVisible(key.currentContext!, duration: const Duration(milliseconds: 300), alignment: 0.5, curve: Curves.easeOutCubic);
@@ -729,7 +729,7 @@ class ChatScreenState extends State<ChatScreen> {
       await Future.delayed(const Duration(milliseconds: 30));
       if (!mounted || gen != _scrollGeneration) return;
 
-      final ctx = _msgKeys[targetId]?.currentContext;
+      final ctx = _msgKeys['msg_$targetId']?.currentContext;
       if (ctx != null) {
         try {
           await Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 180), alignment: 0.5, curve: Curves.easeOutCubic);
@@ -753,7 +753,6 @@ class ChatScreenState extends State<ChatScreen> {
   Widget _buildReplyQuoteInBubble(ReplyPreview quote, bool isMe, Color textColor) {
     final accent = isMe ? Colors.green[800]! : Theme.of(context).colorScheme.primary;
 
-    // Если цитата - это картинка, рисуем миниатюру
     if (_isImageMarkdown(quote.text)) {
       final match = RegExp(r'!\[([^\]]*)\]\(([^)]+)\)').firstMatch(quote.text.trim());
       final url = match?.group(2) ?? '';
@@ -806,7 +805,6 @@ class ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    // Обычный текст: очищаем ссылки
     var cleanText = quote.text.replaceAllMapped(RegExp(r'\[([^\]]+)\]\([^)]+\)'), (m) => m.group(1)!);
 
     return Padding(
@@ -871,6 +869,7 @@ class ChatScreenState extends State<ChatScreen> {
 
   Widget _buildMessageBubble(
       int msgId,
+      int clientMsgId,
       String sender,
       String text,
       bool isMe,
@@ -897,7 +896,7 @@ class ChatScreenState extends State<ChatScreen> {
       codeBackground: isMe ? Colors.black.withValues(alpha: 0.05) : Colors.black.withValues(alpha: 0.2),
       codeRadius: BorderRadius.circular(8),
       codePadding: const EdgeInsets.all(12),
-      codeHighlightTheme: 'darcula', // <--- ТЕМА PYCHARM
+      codeHighlightTheme: 'darcula',
       showCodeLanguageLabel: true,
       showCodeCopyButton: true,
       linkStyle: TextStyle(color: isMe ? Colors.blue[800] : Colors.blue[200], decoration: TextDecoration.underline),
@@ -962,7 +961,7 @@ class ChatScreenState extends State<ChatScreen> {
                 _buildStatusIcons(
                   (
                   id: msgId,
-                  clientMsgId: 0, // не используется в UI
+                  clientMsgId: clientMsgId,
                   sender: sender,
                   text: text,
                   isMe: isMe,
@@ -1008,15 +1007,17 @@ class ChatScreenState extends State<ChatScreen> {
       child: bubbleContent,
     );
 
+    // Исправленный ключ для уникальности (учитывает локальные сообщения)
+    final uniqueKey = msgId != 0 ? 'msg_$msgId' : 'client_$clientMsgId';
     final keyedBubble = KeyedSubtree(
-      key: _msgKeys.putIfAbsent(msgId, () => GlobalKey()),
+      key: _msgKeys.putIfAbsent(uniqueKey, () => GlobalKey()),
       child: gestureWrapped,
     );
 
     Widget swipeable = keyedBubble;
     if (widget.onSetReply != null) {
       swipeable = Dismissible(
-        key: ValueKey('reply_swipe_$msgId'),
+        key: ValueKey('reply_swipe_$uniqueKey'),
         direction: DismissDirection.endToStart,
         confirmDismiss: (dir) async {
           if (_editingMsgId != null) _cancelEdit();
@@ -1135,7 +1136,6 @@ class ChatScreenState extends State<ChatScreen> {
 
   Widget _buildInputField(EdgeInsets padding) {
     final isEditing = _editingMsgId != null;
-
     return Padding(
       padding: padding,
       child: Row(
@@ -1143,15 +1143,12 @@ class ChatScreenState extends State<ChatScreen> {
           Expanded(
             child: CallbackShortcuts(
               bindings: {
-                // Перехватываем чистый Enter (и Enter на нумпаде)
                 const SingleActivator(LogicalKeyboardKey.enter): () {
                   _sendMessage();
                 },
                 const SingleActivator(LogicalKeyboardKey.numpadEnter): () {
                   _sendMessage();
                 },
-                // Ctrl+Enter и Shift+Enter автоматически НЕ перехватываются
-                // и уходят в TextField как перенос строки (\n)
               },
               child: TextField(
                 controller: widget.controller,
@@ -1201,9 +1198,36 @@ class ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildJoinButton(EdgeInsets padding) {
+    return Container(
+      padding: EdgeInsets.only(bottom: padding.bottom, left: 12, right: 12, top: 12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        border: Border(top: BorderSide(color: Colors.grey[300]!)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: widget.onJoinGroup,
+            icon: const Icon(Icons.group_add),
+            label: const Text('Присоединиться'),
+            style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildBottomArea(EdgeInsets inputPadding) {
     final isChannel = widget.chatName.startsWith('&');
+    final isGroup = widget.chatName.startsWith('#');
     final isEditing = _editingMsgId != null;
+
+    if (isGroup && !widget.isGroupMember) {
+      return _buildJoinButton(inputPadding);
+    }
 
     Widget previewBar;
     if (isEditing) {
@@ -1365,6 +1389,7 @@ class ChatScreenState extends State<ChatScreen> {
       }
       items.add(_buildMessageBubble(
         msg.id,
+        msg.clientMsgId,
         msg.sender,
         msg.text,
         msg.isMe,

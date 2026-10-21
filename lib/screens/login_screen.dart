@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart'; // Для TapGestureRecognizer
+import 'package:url_launcher/url_launcher.dart'; // Для открытия ссылок
 import 'package:uuid/uuid.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/websocket_service.dart';
@@ -26,8 +28,10 @@ class _LoginScreenState extends State<LoginScreen> {
   final _firstNameController = TextEditingController();
   final _lastNameController = TextEditingController();
   final _usernameController = TextEditingController();
+
   bool _isRegister = false;
   bool _isLoading = false;
+  bool _isAgreed = false; // <--- НОВОЕ ПОЛЕ ДЛЯ ЧЕКБОКСА
   String? _errorMessage;
   String _serverAddress = 'vartchat.alwaysdata.net';
 
@@ -97,7 +101,6 @@ class _LoginScreenState extends State<LoginScreen> {
         await _wsService.connect(_serverAddress);
         final hsErr = await _wsService.performHandshake();
         if (hsErr != null) {
-          // Сервер отверг: несовместимая версия.
           await _wsService.disconnect();
           if (mounted) {
             setState(() {
@@ -111,12 +114,10 @@ class _LoginScreenState extends State<LoginScreen> {
         _subscription?.cancel();
         _subscription = _wsService.onMessage.listen(_handleIncomingMessage);
         await StorageService.saveServer(_serverAddress);
-        print('[UI] Подключение к серверу $_serverAddress установлено');
       }
 
       if (restoreToken != null) {
         await _wsService.sendToken(restoreToken, fcmToken: FcmService.token);
-        print('[UI] Токен восстановления отправлен');
       } else {
         final phone = _phoneController.text.trim();
         final password = _passwordController.text.trim();
@@ -147,7 +148,6 @@ class _LoginScreenState extends State<LoginScreen> {
             fcmToken: FcmService.token,
           );
         }
-        print('[UI] Запрос аутентификации отправлен');
       }
     } catch (e) {
       print('[UI] Ошибка подключения/аутентификации: $e');
@@ -168,10 +168,7 @@ class _LoginScreenState extends State<LoginScreen> {
       barrierDismissible: false,
       builder: (_) => AlertDialog(
         title: const Text('Несовместимая версия'),
-        content: Text(
-          'Сервер сообщил: $reason\n\n'
-              'Обновите приложение, чтобы продолжить.',
-        ),
+        content: Text('Сервер сообщил: $reason\n\nОбновите приложение, чтобы продолжить.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -183,17 +180,13 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _handleIncomingMessage(Uint8List data) {
-    print('[UI] _handleIncomingMessage: получен пакет, длина=${data.length}');
     try {
       final parsed = Protocol.parsePacket(data);
       final type = parsed.type;
       final payload = parsed.payload;
-      print('[UI] тип=0x${type.toRadixString(16)}');
 
-      // S→C 0x06 — принудительное завершение сессии.
       if (type == Protocol.MSG_TYPE_LOGOUT) {
         final reason = Protocol.parseLogoutFromServer(payload);
-        print('[UI] Сервер завершил сессию: $reason');
         _subscription?.cancel();
         _subscription = null;
         StorageService.clearAll();
@@ -209,13 +202,11 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
-        print('[UI] Системное сообщение: $text');
 
         if (text.contains('Недействительный токен') ||
             text.contains('Ошибка восстановления') ||
             text.contains('Неверный телефон') ||
             text.contains('Сессия не найдена')) {
-          print('[UI] Ошибка аутентификации: $text');
           _subscription?.cancel();
           _subscription = null;
           setState(() {
@@ -236,8 +227,6 @@ class _LoginScreenState extends State<LoginScreen> {
             final userId = parts[1];
             final token = parts[2];
             final username = parts[3];
-            print(
-                '[UI] Аутентификация успешна! userId=$userId, token=$token, username=$username');
             _currentUsername = username;
             _wsService.setCredentials(username, fcmToken: FcmService.token);
             StorageService.saveToken(token);
@@ -245,8 +234,6 @@ class _LoginScreenState extends State<LoginScreen> {
             StorageService.saveUserId(userId);
 
             Future.delayed(const Duration(milliseconds: 500), () async {
-              print(
-                  '[UI] Задержка завершена. Всего исторических сообщений: ${_historyMessages.length}');
               _subscription?.cancel();
               _subscription = null;
               await DatabaseService.clearData();
@@ -271,37 +258,25 @@ class _LoginScreenState extends State<LoginScreen> {
         }
       } else if (type == Protocol.MSG_TYPE_USER) {
         final parsedUser = Protocol.parseUserPacket(payload);
-        final sender = parsedUser.sender;
-        final recipient = parsedUser.recipient;
-        final encrypted = parsedUser.encrypted;
-        final nonce = parsedUser.nonce;
-        final timestamp = parsedUser.timestamp;
-        final replyToId = parsedUser.replyToId;
-        final flagMe = parsedUser.flagMe;
-        final flagAny = parsedUser.flagAny;
-        final views = parsedUser.views;
-
         final key = _wsService.sessionKey;
-        if (key == null) {
-          print('[UI] Нет ключа для расшифровки');
-          return;
-        }
+        if (key == null) return;
 
         try {
-          CryptoService.decryptAesGcm(encrypted, key, nonce).then((plaintext) {
+          CryptoService.decryptAesGcm(parsedUser.encrypted, key, parsedUser.nonce).then((plaintext) {
             final text = utf8.decode(plaintext, allowMalformed: true);
-            final isMe = (sender == _currentUsername);
+            final isMe = (parsedUser.sender == _currentUsername);
             final message = ChatMessage(
               id: parsedUser.msgId,
-              sender: sender,
-              recipient: recipient,
+              sender: parsedUser.sender,
+              recipient: parsedUser.recipient,
               text: text,
               isMe: isMe,
-              timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp),
-              replyToId: replyToId,
-              readMe: flagMe,
-              readAny: flagAny,
-              views: views,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(parsedUser.timestamp),
+              replyToId: parsedUser.replyToId,
+              readMe: parsedUser.flagMe,
+              readAny: parsedUser.flagAny,
+              views: parsedUser.views,
+              edited: parsedUser.edited,
             );
             _historyMessages.add(message);
           }).catchError((e) {
@@ -324,8 +299,7 @@ class _LoginScreenState extends State<LoginScreen> {
         title: const Text('Адрес сервера'),
         content: TextField(
           controller: controller,
-          decoration: const InputDecoration(
-              hintText: 'например, vartchat.alwaysdata.net'),
+          decoration: const InputDecoration(hintText: 'например, vartchat.alwaysdata.net'),
         ),
         actions: [
           TextButton(
@@ -356,7 +330,60 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _onLoginPressed() async {
+    if (!_isAgreed) return; // Дополнительная защита
     await _connectAndAuth();
+  }
+
+  // --- Виджет для отображения согласия со ссылками ---
+  Widget _buildAgreementCheckbox() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Checkbox(
+            value: _isAgreed,
+            onChanged: (val) {
+              setState(() => _isAgreed = val ?? false);
+            },
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 14.0),
+              child: RichText(
+                text: TextSpan(
+                  style: const TextStyle(fontSize: 12, color: Colors.black87, height: 1.4),
+                  children: [
+                    const TextSpan(text: 'Я даю согласие на '),
+                    TextSpan(
+                      text: 'обработку персональных данных',
+                      style: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
+                      recognizer: TapGestureRecognizer()
+                        ..onTap = () => launchUrl(Uri.parse('https://vartrusdata.alwaysdata.net/coglpersdanvartchat.html'), mode: LaunchMode.externalApplication),
+                    ),
+                    const TextSpan(text: ', а также я прочитал(а) '),
+                    TextSpan(
+                      text: 'политику конфиденциальности',
+                      style: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
+                      recognizer: TapGestureRecognizer()
+                        ..onTap = () => launchUrl(Uri.parse('https://vartrusdata.alwaysdata.net/pkvartchat.html?v=2'), mode: LaunchMode.externalApplication),
+                    ),
+                    const TextSpan(text: ' и '),
+                    TextSpan(
+                      text: 'условия пользования',
+                      style: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
+                      recognizer: TapGestureRecognizer()
+                        ..onTap = () => launchUrl(Uri.parse('https://vartrusdata.alwaysdata.net/ypvartchat.html?v=2'), mode: LaunchMode.externalApplication),
+                    ),
+                    const TextSpan(text: ' и согласен(сна) с ними.'),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -372,15 +399,16 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ],
       ),
-      body: Padding(
+      body: SingleChildScrollView( // <--- Добавлен скролл на случай маленького экрана
         padding: const EdgeInsets.all(24.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            const SizedBox(height: 20),
             Text('VartChat', style: Theme.of(context).textTheme.headlineLarge),
             const SizedBox(height: 32),
             if (_errorMessage != null) ...[
-              Text(_errorMessage!, style: const TextStyle(color: Colors.red)),
+              Text(_errorMessage!, style: const TextStyle(color: Colors.red), textAlign: TextAlign.center),
               const SizedBox(height: 16),
             ],
             TextField(
@@ -412,8 +440,17 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ],
             const SizedBox(height: 24),
+
+            // --- ЧЕКБОКС СОГЛАСИЯ ---
+            _buildAgreementCheckbox(),
+            const SizedBox(height: 16),
+
             ElevatedButton(
-              onPressed: _isLoading ? null : _onLoginPressed,
+              // Кнопка заблокирована, если не согласен или идет загрузка
+              onPressed: (!_isAgreed || _isLoading) ? null : _onLoginPressed,
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 50),
+              ),
               child: _isLoading
                   ? const CircularProgressIndicator()
                   : Text(_isRegister ? 'Зарегистрироваться' : 'Войти'),
@@ -446,6 +483,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 20),
           ],
         ),
       ),

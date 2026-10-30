@@ -6,19 +6,20 @@ import 'package:flutter_sdui_kit/flutter_sdui_kit.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/websocket_service.dart';
+import '../services/protocol.dart';
 
 typedef ChatMsg = ({
-int id,
-int clientMsgId,
-String sender,
-String text,
-bool isMe,
-int timestamp,
-int replyToId,
-bool readMe,
-bool readAny,
-int? views,
-bool edited,
+  int id,
+  int clientMsgId,
+  String sender,
+  String text,
+  bool isMe,
+  int timestamp,
+  int replyToId,
+  bool readMe,
+  bool readAny,
+  int? views,
+  bool edited,
 });
 
 typedef ReplyPreview = ({String sender, String text, bool isMe});
@@ -29,37 +30,30 @@ class ChatScreen extends StatefulWidget {
   final WebSocketService wsService;
   final String chatName;
   final String username;
-
   final List<ChatMsg> messages;
-
   final void Function(String text) onSendMessage;
   final void Function(int msgId)? onDeleteMessage;
   final void Function(int msgId)? onHideForMe;
   final void Function(int msgId, String newText)? onEditMessage;
   final String Function(String username)? resolveDisplayName;
   final void Function(List<int> msgIds)? onMarkRead;
-
   final ScrollController? scrollController;
   final VoidCallback? onBack;
   final bool isWide;
-
   final String? titleOverride;
   final bool isOnline;
   final int? lastSeen;
-
   final ChannelRole? channelRole;
   final VoidCallback? onSubscribe;
-
   final bool isGroupMember;
   final VoidCallback? onJoinGroup;
-
   final TextEditingController controller;
   final FocusNode? focusNode;
-
   final ReplyPreview? activeReply;
   final void Function(int msgId)? onSetReply;
   final VoidCallback? onCancelReply;
   final ReplyPreview? Function(int replyToId)? resolveReply;
+  final List<String> typingUsers; // <--- НОВОЕ ПОЛЕ
 
   const ChatScreen({
     super.key,
@@ -89,6 +83,7 @@ class ChatScreen extends StatefulWidget {
     this.onSetReply,
     this.onCancelReply,
     this.resolveReply,
+    this.typingUsers = const [],
   });
 
   @override
@@ -97,6 +92,7 @@ class ChatScreen extends StatefulWidget {
 
 class ChatScreenState extends State<ChatScreen> {
   Timer? _presenceTimer;
+  DateTime _lastTypingSent = DateTime.fromMillisecondsSinceEpoch(0);
 
   final Set<int> _selectedIds = <int>{};
   final Map<String, GlobalKey> _msgKeys = {};
@@ -107,26 +103,29 @@ class ChatScreenState extends State<ChatScreen> {
   String? _savedDraft;
 
   int _scrollGeneration = 0;
-
   bool _isAtBottom = true;
   int _lastMessagesLength = 0;
 
-  static final ValueNotifier<bool> _intrinsicWidthDisabled = ValueNotifier<bool>(false);
+  static final ValueNotifier<bool> _intrinsicWidthDisabled =
+      ValueNotifier<bool>(false);
   static bool _errorHandlerInstalled = false;
 
   static void _installErrorHandler() {
     if (_errorHandlerInstalled) return;
     _errorHandlerInstalled = true;
-
     final original = FlutterError.onError;
     FlutterError.onError = (FlutterErrorDetails details) {
       final text = details.exceptionAsString();
-      final isDryBaselineBug = text.contains('does not implement "computeDryBaseline"') ||
+      final isDryBaselineBug =
+          text.contains('does not implement "computeDryBaseline"') ||
           (text.contains('computeDryBaseline') && text.contains('RenderLine'));
       if (isDryBaselineBug && !_intrinsicWidthDisabled.value) {
-        debugPrint('[WORKAROUND] computeDryBaseline bug detected — IntrinsicWidth in message bubbles disabled for this session.');
+        debugPrint(
+          '[WORKAROUND] computeDryBaseline bug detected — IntrinsicWidth in message bubbles disabled for this session.',
+        );
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!_intrinsicWidthDisabled.value) _intrinsicWidthDisabled.value = true;
+          if (!_intrinsicWidthDisabled.value)
+            _intrinsicWidthDisabled.value = true;
         });
       }
       if (original != null) {
@@ -141,6 +140,8 @@ class ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _lastMessagesLength = widget.messages.length;
+
+    widget.controller.addListener(_onTextChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -182,12 +183,37 @@ class ChatScreenState extends State<ChatScreen> {
     if (_editingMsgId != null) {
       final draft = _savedDraft ?? '';
       widget.controller.text = draft;
-      widget.controller.selection = TextSelection.collapsed(offset: draft.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: draft.length,
+      );
     }
+    widget.controller.removeListener(_onTextChanged);
     _presenceTimer?.cancel();
     widget.scrollController?.removeListener(_onScrollListener);
     _msgKeys.clear();
     super.dispose();
+  }
+
+  void _onTextChanged() {
+    if (_editingMsgId != null) return; // <--- ДОБАВИТЬ
+    if (widget.controller.text.trim().isEmpty) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastTypingSent).inSeconds < 3) return;
+
+    _lastTypingSent = now;
+    final kind = widget.chatName.startsWith('#')
+        ? Protocol.MSG_KIND_GROUP
+        : (widget.chatName.startsWith('&')
+              ? Protocol.MSG_KIND_CHANNEL
+              : Protocol.MSG_KIND_PERSONAL);
+
+    if (kind != Protocol.MSG_KIND_CHANNEL) {
+      print(
+        '[TYPING] Отправляю пакет: $kind -> ${widget.chatName}',
+      ); // <--- ДОБАВИТЬ
+      widget.wsService.sendTyping(kind, widget.chatName);
+    }
   }
 
   void _onScrollListener() {
@@ -249,9 +275,46 @@ class ChatScreenState extends State<ChatScreen> {
     return a.year == b.year && a.month == b.month && a.day == b.day;
   }
 
-  String? _buildPresenceSubtitle() {
+  Widget? _buildPresenceWidget() {
+    // 1. Если кто-то печатает
+    if (widget.typingUsers.isNotEmpty) {
+      String text;
+      // Если это личный чат (titleOverride != null), имя не пишем
+      if (widget.titleOverride != null) {
+        text = 'печатает';
+      } else if (widget.typingUsers.length == 1) {
+        final name =
+            widget.resolveDisplayName?.call(widget.typingUsers.first) ??
+            widget.typingUsers.first;
+        text = '$name печатает';
+      } else {
+        text = '${widget.typingUsers.length} человека печатают';
+      }
+
+      return TypingIndicator(
+        text: text,
+        style: TextStyle(
+          // <--- Убрали const
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+          color: Theme.of(context).colorScheme.primary, // <--- Цвет темы
+        ),
+      );
+    }
+
+    // 2. Если никто не печатает, показываем обычный статус (в сети, был(а)...)
     if (widget.titleOverride == null) return null;
-    if (widget.isOnline) return 'в сети';
+    if (widget.isOnline) {
+      return Text(
+        'в сети',
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+          color: Colors.green,
+          overflow: TextOverflow.ellipsis,
+        ),
+      );
+    }
 
     final ls = widget.lastSeen;
     if (ls == null || ls == 0) return null;
@@ -260,19 +323,30 @@ class ChatScreenState extends State<ChatScreen> {
     final dt = DateTime.fromMillisecondsSinceEpoch(ls);
     final diff = now.difference(dt);
 
-    if (diff.inSeconds < 60) return 'был(а) менее минуты назад';
-    if (diff.inMinutes < 60) return 'был(а) ${diff.inMinutes} мин назад';
-
-    if (_isSameDay(now, dt)) {
-      return 'был(а) в ${DateFormat('HH:mm').format(dt)}';
+    String? statusText;
+    if (diff.inSeconds < 60) {
+      statusText = 'был(а) менее минуты назад';
+    } else if (diff.inMinutes < 60) {
+      statusText = 'был(а) ${diff.inMinutes} мин назад';
+    } else if (_isSameDay(now, dt)) {
+      statusText = 'был(а) в ${DateFormat('HH:mm').format(dt)}';
+    } else {
+      final yesterday = now.subtract(const Duration(days: 1));
+      if (_isSameDay(yesterday, dt)) {
+        statusText = 'был(а) вчера';
+      } else {
+        statusText = 'был(а) ${DateFormat('d MMM', 'ru').format(dt)}';
+      }
     }
 
-    final yesterday = now.subtract(const Duration(days: 1));
-    if (_isSameDay(yesterday, dt)) {
-      return 'был(а) вчера';
-    }
-
-    return 'был(а) ${DateFormat('d MMM', 'ru').format(dt)}';
+    return Text(
+      statusText,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: 14,
+        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+      ),
+    );
   }
 
   String _senderLabel(String sender) {
@@ -282,7 +356,9 @@ class ChatScreenState extends State<ChatScreen> {
 
   String _autoLink(String text) {
     final codeParts = <String>[];
-    var result = text.replaceAllMapped(RegExp(r'```[\s\S]*?```|`[^`\n]+`'), (m) {
+    var result = text.replaceAllMapped(RegExp(r'```[\s\S]*?```|`[^`\n]+`'), (
+      m,
+    ) {
       codeParts.add(m.group(0)!);
       return '\x00${codeParts.length - 1}\x00';
     });
@@ -293,7 +369,24 @@ class ChatScreenState extends State<ChatScreen> {
       return '\x01${linkParts.length - 1}\x01';
     });
 
-    final urlRegex = RegExp(r'https?://[^\s<>()]+|www\.[^\s<>()]+|\b[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z]{2,})+(?:/[^\s<>()]*)?');
+    // --- ДОБАВЛЕНО: Извлекаем и защищаем e-mail ---
+    final emailParts = <String>[];
+    result = result.replaceAllMapped(
+      RegExp(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
+      (m) {
+        final email = m.group(0)!;
+        emailParts.add('[$email](mailto:$email)');
+        return '\x02${emailParts.length - 1}\x02';
+      },
+    );
+    // ----------------------------------------------
+
+    final urlRegex = RegExp(
+      r'https?://[^\s<>()]+'
+      r'|www\.[^\s<>()]+'
+      r'|\b[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?'
+      r'(?:\.[a-zA-Z]{2,})+(?:/[^\s<>()]*)?',
+    );
 
     result = result.replaceAllMapped(urlRegex, (m) {
       var url = m.group(0)!;
@@ -302,7 +395,9 @@ class ChatScreenState extends State<ChatScreen> {
       }
       if (url.isEmpty) return m.group(0)!;
       final tld = url.split('.').last;
-      if (tld.length < 2 || RegExp(r'^\d+$').hasMatch(tld)) return m.group(0)!;
+      if (tld.length < 2 || RegExp(r'^\d+$').hasMatch(tld)) {
+        return m.group(0)!;
+      }
       final href = url.startsWith('http') ? url : 'https://$url';
       return '[$url]($href)';
     });
@@ -310,27 +405,44 @@ class ChatScreenState extends State<ChatScreen> {
     for (var i = 0; i < linkParts.length; i++) {
       result = result.replaceAll('\x01$i\x01', linkParts[i]);
     }
+
+    // --- ДОБАВЛЕНО: Восстанавливаем e-mail ---
+    for (var i = 0; i < emailParts.length; i++) {
+      result = result.replaceAll('\x02$i\x02', emailParts[i]);
+    }
+    // ----------------------------------------
+
     for (var i = 0; i < codeParts.length; i++) {
       result = result.replaceAll('\x00$i\x00', codeParts[i]);
     }
     return result;
   }
 
-  void _wrapSelection(String prefix, String suffix, {String placeholder = 'текст'}) {
+  void _wrapSelection(
+    String prefix,
+    String suffix, {
+    String placeholder = 'текст',
+  }) {
     final text = widget.controller.text;
     final sel = widget.controller.selection;
     if (!sel.isValid) {
       final insert = '$prefix$placeholder$suffix';
       widget.controller.text = text + insert;
-      widget.controller.selection = TextSelection.collapsed(offset: text.length + prefix.length + placeholder.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: text.length + prefix.length + placeholder.length,
+      );
       return;
     }
     final selected = sel.textInside(text);
     final before = text.substring(0, sel.start);
     final after = text.substring(sel.end);
-    final insert = selected.isEmpty ? '$prefix$placeholder$suffix' : '$prefix$selected$suffix';
+    final insert = selected.isEmpty
+        ? '$prefix$placeholder$suffix'
+        : '$prefix$selected$suffix';
     widget.controller.text = before + insert + after;
-    final newOffset = selected.isEmpty ? before.length + prefix.length + placeholder.length : before.length + insert.length;
+    final newOffset = selected.isEmpty
+        ? before.length + prefix.length + placeholder.length
+        : before.length + insert.length;
     widget.controller.selection = TextSelection.collapsed(offset: newOffset);
   }
 
@@ -344,10 +456,14 @@ class ChatScreenState extends State<ChatScreen> {
       final before = text.substring(0, sel.start);
       final after = text.substring(sel.end);
       widget.controller.text = before + insert + after;
-      widget.controller.selection = TextSelection.collapsed(offset: before.length + label.length + 3);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: before.length + label.length + 3,
+      );
     } else {
       widget.controller.text = text + insert;
-      widget.controller.selection = TextSelection.collapsed(offset: text.length + insert.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: text.length + insert.length,
+      );
     }
   }
 
@@ -358,15 +474,22 @@ class ChatScreenState extends State<ChatScreen> {
     if (!sel.isValid) {
       final newText = text + '\n$prefix';
       widget.controller.text = newText;
-      widget.controller.selection = TextSelection.collapsed(offset: newText.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: newText.length,
+      );
       return;
     }
 
     if (sel.isCollapsed) {
-      final lineStart = sel.start > 0 ? text.lastIndexOf('\n', sel.start - 1) + 1 : 0;
-      final newText = text.substring(0, lineStart) + prefix + text.substring(lineStart);
+      final lineStart = sel.start > 0
+          ? text.lastIndexOf('\n', sel.start - 1) + 1
+          : 0;
+      final newText =
+          text.substring(0, lineStart) + prefix + text.substring(lineStart);
       widget.controller.text = newText;
-      widget.controller.selection = TextSelection.collapsed(offset: sel.start + prefix.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: sel.start + prefix.length,
+      );
       return;
     }
 
@@ -405,10 +528,14 @@ class ChatScreenState extends State<ChatScreen> {
       final before = text.substring(0, sel.start);
       final after = text.substring(sel.end);
       widget.controller.text = before + insert + after;
-      widget.controller.selection = TextSelection.collapsed(offset: before.length + insert.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: before.length + insert.length,
+      );
     } else {
       widget.controller.text = text + insert;
-      widget.controller.selection = TextSelection.collapsed(offset: widget.controller.text.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: widget.controller.text.length,
+      );
     }
   }
 
@@ -423,14 +550,42 @@ class ChatScreenState extends State<ChatScreen> {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            _toolbarButton(Icons.format_bold, 'Жирный', () => _wrapSelection('**', '**', placeholder: 'жирный')),
-            _toolbarButton(Icons.format_italic, 'Курсив', () => _wrapSelection('*', '*', placeholder: 'курсив')),
-            _toolbarButton(Icons.code, 'Инлайн-код', () => _wrapSelection('`', '`', placeholder: 'код')),
-            _toolbarButton(Icons.data_object, 'Блок кода', () => _insertBlock('```')),
+            _toolbarButton(
+              Icons.format_bold,
+              'Жирный',
+              () => _wrapSelection('**', '**', placeholder: 'жирный'),
+            ),
+            _toolbarButton(
+              Icons.format_italic,
+              'Курсив',
+              () => _wrapSelection('*', '*', placeholder: 'курсив'),
+            ),
+            _toolbarButton(
+              Icons.code,
+              'Инлайн-код',
+              () => _wrapSelection('`', '`', placeholder: 'код'),
+            ),
+            _toolbarButton(
+              Icons.data_object,
+              'Блок кода',
+              () => _insertBlock('```'),
+            ),
             _toolbarButton(Icons.link, 'Ссылка', _insertLink),
-            _toolbarButton(Icons.format_quote, 'Цитата', () => _insertLinePrefix('> ')),
-            _toolbarButton(Icons.format_list_bulleted, 'Список', () => _insertLinePrefix('- ')),
-            _toolbarButton(Icons.format_list_numbered, 'Нумерованный список', () => _insertLinePrefix('1. ')),
+            _toolbarButton(
+              Icons.format_quote,
+              'Цитата',
+              () => _insertLinePrefix('> '),
+            ),
+            _toolbarButton(
+              Icons.format_list_bulleted,
+              'Список',
+              () => _insertLinePrefix('- '),
+            ),
+            _toolbarButton(
+              Icons.format_list_numbered,
+              'Нумерованный список',
+              () => _insertLinePrefix('1. '),
+            ),
           ],
         ),
       ),
@@ -454,8 +609,14 @@ class ChatScreenState extends State<ChatScreen> {
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 8),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(50)),
-        child: Text(formatter.format(date), style: const TextStyle(fontSize: 12, color: Colors.black54)),
+        decoration: BoxDecoration(
+          color: Colors.grey[300],
+          borderRadius: BorderRadius.circular(50),
+        ),
+        child: Text(
+          formatter.format(date),
+          style: const TextStyle(fontSize: 12, color: Colors.black54),
+        ),
       ),
     );
   }
@@ -463,13 +624,15 @@ class ChatScreenState extends State<ChatScreen> {
   bool _canDelete(bool isMe) {
     final chatKey = widget.chatName;
     if (chatKey.startsWith('#')) return false;
-    if (chatKey.startsWith('&')) return widget.channelRole == ChannelRole.creator;
+    if (chatKey.startsWith('&'))
+      return widget.channelRole == ChannelRole.creator;
     return isMe;
   }
 
   bool _canEdit(bool isMe) {
     final chatKey = widget.chatName;
-    if (chatKey.startsWith('&')) return widget.channelRole == ChannelRole.creator;
+    if (chatKey.startsWith('&'))
+      return widget.channelRole == ChannelRole.creator;
     return isMe;
   }
 
@@ -477,7 +640,8 @@ class ChatScreenState extends State<ChatScreen> {
     if (_selectedIds.isEmpty) return false;
     final chatKey = widget.chatName;
     if (chatKey.startsWith('#')) return false;
-    if (chatKey.startsWith('&')) return widget.channelRole == ChannelRole.creator;
+    if (chatKey.startsWith('&'))
+      return widget.channelRole == ChannelRole.creator;
     for (final msg in widget.messages) {
       if (_selectedIds.contains(msg.id) && !msg.isMe) return false;
     }
@@ -494,8 +658,10 @@ class ChatScreenState extends State<ChatScreen> {
   void _enterSelection(int msgId) => setState(() => _selectedIds.add(msgId));
   void _toggleSelection(int msgId) {
     setState(() {
-      if (_selectedIds.contains(msgId)) _selectedIds.remove(msgId);
-      else _selectedIds.add(msgId);
+      if (_selectedIds.contains(msgId))
+        _selectedIds.remove(msgId);
+      else
+        _selectedIds.add(msgId);
     });
   }
 
@@ -520,7 +686,8 @@ class ChatScreenState extends State<ChatScreen> {
       final label = _senderLabel(msg.sender);
       final isAdjacent = prevIdx != null && i == prevIdx! + 1;
       final sameSender = prevLabel == label;
-      final withinMinute = prevTs != null && (msg.timestamp - prevTs!).abs() <= 60000;
+      final withinMinute =
+          prevTs != null && (msg.timestamp - prevTs!).abs() <= 60000;
       final continueBlock = isAdjacent && sameSender && withinMinute;
 
       if (continueBlock) {
@@ -550,7 +717,9 @@ class ChatScreenState extends State<ChatScreen> {
     if (_selectedIds.isEmpty) return;
     final text = _buildCopyText();
     Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Скопировано сообщений: ${_selectedIds.length}')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Скопировано сообщений: ${_selectedIds.length}')),
+    );
     setState(() => _selectedIds.clear());
   }
 
@@ -586,7 +755,12 @@ class ChatScreenState extends State<ChatScreen> {
       return;
     }
     final size = MediaQuery.of(context).size;
-    final position = RelativeRect.fromLTRB(globalPos.dx, globalPos.dy, size.width - globalPos.dx, size.height - globalPos.dy);
+    final position = RelativeRect.fromLTRB(
+      globalPos.dx,
+      globalPos.dy,
+      size.width - globalPos.dx,
+      size.height - globalPos.dy,
+    );
     _showContextMenu(msgId, text, isMe, position);
   }
 
@@ -609,22 +783,102 @@ class ChatScreenState extends State<ChatScreen> {
     _toggleSelection(msgId);
   }
 
-  Future<void> _showContextMenu(int msgId, String text, bool isMe, RelativeRect position) async {
+  Future<void> _showContextMenu(
+    int msgId,
+    String text,
+    bool isMe,
+    RelativeRect position,
+  ) async {
     final items = <PopupMenuEntry<String>>[
-      const PopupMenuItem<String>(value: 'reply', height: 44, child: Row(children: [Icon(Icons.reply, size: 20), SizedBox(width: 12), Text('Ответить')])),
-      const PopupMenuItem<String>(value: 'copy', height: 44, child: Row(children: [Icon(Icons.copy, size: 20), SizedBox(width: 12), Text('Копировать')])),
+      const PopupMenuItem<String>(
+        value: 'reply',
+        height: 44,
+        child: Row(
+          children: [
+            Icon(Icons.reply, size: 20),
+            SizedBox(width: 12),
+            Text('Ответить'),
+          ],
+        ),
+      ),
+      const PopupMenuItem<String>(
+        value: 'copy',
+        height: 44,
+        child: Row(
+          children: [
+            Icon(Icons.copy, size: 20),
+            SizedBox(width: 12),
+            Text('Копировать'),
+          ],
+        ),
+      ),
     ];
     if (msgId != 0 && _canEdit(isMe)) {
-      items.add(const PopupMenuItem<String>(value: 'edit', height: 44, child: Row(children: [Icon(Icons.edit, size: 20), SizedBox(width: 12), Text('Редактировать')])));
+      items.add(
+        const PopupMenuItem<String>(
+          value: 'edit',
+          height: 44,
+          child: Row(
+            children: [
+              Icon(Icons.edit, size: 20),
+              SizedBox(width: 12),
+              Text('Редактировать'),
+            ],
+          ),
+        ),
+      );
     }
     if (msgId != 0 && _canDelete(isMe)) {
-      items.add(const PopupMenuItem<String>(value: 'delete', height: 44, child: Row(children: [Icon(Icons.delete, size: 20, color: Colors.red), SizedBox(width: 12), Text('Удалить у всех', style: TextStyle(color: Colors.red))])));
+      items.add(
+        const PopupMenuItem<String>(
+          value: 'delete',
+          height: 44,
+          child: Row(
+            children: [
+              Icon(Icons.delete, size: 20, color: Colors.red),
+              SizedBox(width: 12),
+              Text('Удалить у всех', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+        ),
+      );
     }
     if (_canHideForMe()) {
-      items.add(const PopupMenuItem<String>(value: 'hide', height: 44, child: Row(children: [Icon(Icons.delete_outline, size: 20, color: Colors.red), SizedBox(width: 12), Text('Удалить у себя', style: TextStyle(color: Colors.red))])));
+      items.add(
+        const PopupMenuItem<String>(
+          value: 'hide',
+          height: 44,
+          child: Row(
+            children: [
+              Icon(Icons.delete_outline, size: 20, color: Colors.red),
+              SizedBox(width: 12),
+              Text('Удалить у себя', style: TextStyle(color: Colors.red)),
+            ],
+          ),
+        ),
+      );
+    }
+    if (msgId != 0) {
+      items.add(
+        const PopupMenuItem<String>(
+          value: 'report',
+          height: 44,
+          child: Row(
+            children: [
+              Icon(Icons.report_problem, size: 20, color: Colors.orange),
+              SizedBox(width: 12),
+              Text('Пожаловаться', style: TextStyle(color: Colors.orange)),
+            ],
+          ),
+        ),
+      );
     }
 
-    final result = await showMenu<String>(context: context, position: position, items: items);
+    final result = await showMenu<String>(
+      context: context,
+      position: position,
+      items: items,
+    );
     if (!mounted) return;
     if (result == 'reply') {
       if (_editingMsgId != null) _cancelEdit();
@@ -637,7 +891,64 @@ class ChatScreenState extends State<ChatScreen> {
       widget.onDeleteMessage?.call(msgId);
     } else if (result == 'hide') {
       widget.onHideForMe?.call(msgId);
+    } else if (result == 'report') {
+      _showReportDialog(msgId);
     }
+  }
+
+  void _showReportDialog(int msgId) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Пожаловаться на сообщение'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: const Text('Спам'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _sendReport(msgId, 'Спам');
+              },
+            ),
+            ListTile(
+              title: const Text('Оскорбления / Грубость'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _sendReport(msgId, 'Оскорбления');
+              },
+            ),
+            ListTile(
+              title: const Text('Другое'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _sendReport(msgId, 'Другое');
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _sendReport(int msgId, String reason) {
+    final kind = widget.chatName.startsWith('#')
+        ? Protocol.MSG_KIND_GROUP
+        : (widget.chatName.startsWith('&')
+              ? Protocol.MSG_KIND_CHANNEL
+              : Protocol.MSG_KIND_PERSONAL);
+
+    widget.wsService.sendCommand('/report $kind $msgId $reason');
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Жалоба отправлена модераторам')),
+    );
   }
 
   void _startEdit(int msgId, String text) {
@@ -653,7 +964,10 @@ class ChatScreenState extends State<ChatScreen> {
       _selectedIds.clear();
       _mdDisabledForId = null;
       widget.controller.text = text;
-      widget.controller.selection = TextSelection(baseOffset: 0, extentOffset: text.length);
+      widget.controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: text.length,
+      );
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) widget.focusNode?.requestFocus();
@@ -667,13 +981,17 @@ class ChatScreenState extends State<ChatScreen> {
       _editingMsgId = null;
       _savedDraft = null;
       widget.controller.text = draft;
-      widget.controller.selection = TextSelection.collapsed(offset: draft.length);
+      widget.controller.selection = TextSelection.collapsed(
+        offset: draft.length,
+      );
     });
   }
 
   void _copyText(String text) {
     Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текст скопирован')));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Текст скопирован')));
   }
 
   void _scrollToBottom() {
@@ -682,7 +1000,11 @@ class ChatScreenState extends State<ChatScreen> {
     final distance = sc.offset;
     if (distance <= 0.5) return;
     final durationMs = distance.clamp(80.0, 300.0).toInt();
-    sc.animateTo(0, duration: Duration(milliseconds: durationMs), curve: Curves.easeOutCubic);
+    sc.animateTo(
+      0,
+      duration: Duration(milliseconds: durationMs),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   Future<void> _scrollToMessage(int targetId) async {
@@ -690,13 +1012,19 @@ class ChatScreenState extends State<ChatScreen> {
 
     setState(() => _highlightedMsgId = targetId);
     Future.delayed(const Duration(milliseconds: 1500), () {
-      if (mounted && _highlightedMsgId == targetId) setState(() => _highlightedMsgId = null);
+      if (mounted && _highlightedMsgId == targetId)
+        setState(() => _highlightedMsgId = null);
     });
 
     final key = _msgKeys.putIfAbsent('msg_$targetId', () => GlobalKey());
     if (key.currentContext != null) {
       try {
-        await Scrollable.ensureVisible(key.currentContext!, duration: const Duration(milliseconds: 300), alignment: 0.5, curve: Curves.easeOutCubic);
+        await Scrollable.ensureVisible(
+          key.currentContext!,
+          duration: const Duration(milliseconds: 300),
+          alignment: 0.5,
+          curve: Curves.easeOutCubic,
+        );
       } catch (_) {}
       return;
     }
@@ -705,8 +1033,11 @@ class ChatScreenState extends State<ChatScreen> {
     final idx = msgs.indexWhere((m) => m.id == targetId);
     if (idx < 0) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Сообщение не в загруженной истории')));
-        if (_highlightedMsgId == targetId) setState(() => _highlightedMsgId = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Сообщение не в загруженной истории')),
+        );
+        if (_highlightedMsgId == targetId)
+          setState(() => _highlightedMsgId = null);
       }
       return;
     }
@@ -720,9 +1051,16 @@ class ChatScreenState extends State<ChatScreen> {
 
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       if (!mounted || gen != _scrollGeneration) return;
-      final estimated = (revIndex * avgHeight).clamp(0.0, sc.position.maxScrollExtent);
+      final estimated = (revIndex * avgHeight).clamp(
+        0.0,
+        sc.position.maxScrollExtent,
+      );
       try {
-        await sc.animateTo(estimated, duration: const Duration(milliseconds: 180), curve: Curves.easeOutCubic);
+        await sc.animateTo(
+          estimated,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+        );
       } catch (_) {
         return;
       }
@@ -732,7 +1070,12 @@ class ChatScreenState extends State<ChatScreen> {
       final ctx = _msgKeys['msg_$targetId']?.currentContext;
       if (ctx != null) {
         try {
-          await Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 180), alignment: 0.5, curve: Curves.easeOutCubic);
+          await Scrollable.ensureVisible(
+            ctx,
+            duration: const Duration(milliseconds: 180),
+            alignment: 0.5,
+            curve: Curves.easeOutCubic,
+          );
         } catch (_) {}
         return;
       }
@@ -750,11 +1093,19 @@ class ChatScreenState extends State<ChatScreen> {
     return RegExp(r'!\[[^\]]*\]\([^)]+\)').hasMatch(text.trim());
   }
 
-  Widget _buildReplyQuoteInBubble(ReplyPreview quote, bool isMe, Color textColor) {
-    final accent = isMe ? Colors.green[800]! : Theme.of(context).colorScheme.primary;
+  Widget _buildReplyQuoteInBubble(
+    ReplyPreview quote,
+    bool isMe,
+    Color textColor,
+  ) {
+    final accent = isMe
+        ? Colors.green[800]!
+        : Theme.of(context).colorScheme.primary;
 
     if (_isImageMarkdown(quote.text)) {
-      final match = RegExp(r'!\[([^\]]*)\]\(([^)]+)\)').firstMatch(quote.text.trim());
+      final match = RegExp(
+        r'!\[([^\]]*)\]\(([^)]+)\)',
+      ).firstMatch(quote.text.trim());
       final url = match?.group(2) ?? '';
       final alt = match?.group(1) ?? 'Картинка';
 
@@ -773,7 +1124,11 @@ class ChatScreenState extends State<ChatScreen> {
             children: [
               Text(
                 _senderLabel(quote.sender),
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: accent),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                  color: accent,
+                ),
               ),
               const SizedBox(height: 4),
               ClipRRect(
@@ -784,15 +1139,26 @@ class ChatScreenState extends State<ChatScreen> {
                   height: 60,
                   fit: BoxFit.cover,
                   errorBuilder: (context, error, stackTrace) => Container(
-                    width: 60, height: 60, color: Colors.black12,
+                    width: 60,
+                    height: 60,
+                    color: Colors.black12,
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.image_not_supported, size: 20, color: textColor.withValues(alpha: 0.7)),
+                        Icon(
+                          Icons.image_not_supported,
+                          size: 20,
+                          color: textColor.withValues(alpha: 0.7),
+                        ),
                         if (alt.isNotEmpty && alt != 'Картинка')
                           Padding(
                             padding: const EdgeInsets.only(top: 2),
-                            child: Text(alt, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 8, color: textColor)),
+                            child: Text(
+                              alt,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 8, color: textColor),
+                            ),
                           ),
                       ],
                     ),
@@ -805,7 +1171,10 @@ class ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    var cleanText = quote.text.replaceAllMapped(RegExp(r'\[([^\]]+)\]\([^)]+\)'), (m) => m.group(1)!);
+    var cleanText = quote.text.replaceAllMapped(
+      RegExp(r'\[([^\]]+)\]\([^)]+\)'),
+      (m) => m.group(1)!,
+    );
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -822,13 +1191,20 @@ class ChatScreenState extends State<ChatScreen> {
           children: [
             Text(
               _senderLabel(quote.sender),
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: accent),
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+                color: accent,
+              ),
             ),
             Text(
               cleanText,
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 12, color: textColor.withValues(alpha: 0.85)),
+              style: TextStyle(
+                fontSize: 12,
+                color: textColor.withValues(alpha: 0.85),
+              ),
             ),
           ],
         ),
@@ -841,9 +1217,23 @@ class ChatScreenState extends State<ChatScreen> {
     final children = <Widget>[];
 
     if (isChannel && m.views != null) {
-      children.add(Icon(Icons.visibility, size: 12, color: textColor.withValues(alpha: 0.7)));
+      children.add(
+        Icon(
+          Icons.visibility,
+          size: 12,
+          color: textColor.withValues(alpha: 0.7),
+        ),
+      );
       children.add(const SizedBox(width: 2));
-      children.add(Text('${m.views}', style: TextStyle(fontSize: 10, color: textColor.withValues(alpha: 0.7))));
+      children.add(
+        Text(
+          '${m.views}',
+          style: TextStyle(
+            fontSize: 10,
+            color: textColor.withValues(alpha: 0.7),
+          ),
+        ),
+      );
     }
 
     if (m.isMe && !isChannel) {
@@ -868,23 +1258,27 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildMessageBubble(
-      int msgId,
-      int clientMsgId,
-      String sender,
-      String text,
-      bool isMe,
-      int timestamp,
-      int replyToId,
-      bool readMe,
-      bool readAny,
-      int? views,
-      bool edited,
-      bool isGroupOrChannel,
-      double maxWidth,
-      ) {
+    int msgId,
+    int clientMsgId,
+    String sender,
+    String text,
+    bool isMe,
+    int timestamp,
+    int replyToId,
+    bool readMe,
+    bool readAny,
+    int? views,
+    bool edited,
+    bool isGroupOrChannel,
+    double maxWidth,
+  ) {
     final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
-    final backgroundColor = isMe ? Colors.green[100] : Theme.of(context).colorScheme.secondary;
-    final textColor = isMe ? Colors.black87 : Theme.of(context).colorScheme.onSecondary;
+    final backgroundColor = isMe
+        ? Colors.green[100]
+        : Theme.of(context).colorScheme.secondary;
+    final textColor = isMe
+        ? Colors.black87
+        : Theme.of(context).colorScheme.onSecondary;
     final isSelected = _selectedIds.contains(msgId);
     final isHighlighted = _highlightedMsgId == msgId;
     final mdDisabled = _mdDisabledForId == msgId;
@@ -892,14 +1286,24 @@ class ChatScreenState extends State<ChatScreen> {
 
     final markdownTheme = MarkdownTheme.chatGptLight.copyWith(
       paragraph: TextStyle(color: textColor, fontSize: 14),
-      code: TextStyle(color: textColor, backgroundColor: Colors.black.withValues(alpha: 0.1), fontFamily: 'monospace', fontSize: 13),
-      codeBackground: isMe ? Colors.black.withValues(alpha: 0.05) : Colors.black.withValues(alpha: 0.2),
+      code: TextStyle(
+        color: textColor,
+        backgroundColor: Colors.black.withValues(alpha: 0.1),
+        fontFamily: 'monospace',
+        fontSize: 13,
+      ),
+      codeBackground: isMe
+          ? Colors.black.withValues(alpha: 0.05)
+          : Colors.black.withValues(alpha: 0.2),
       codeRadius: BorderRadius.circular(8),
       codePadding: const EdgeInsets.all(12),
       codeHighlightTheme: 'darcula',
       showCodeLanguageLabel: true,
       showCodeCopyButton: true,
-      linkStyle: TextStyle(color: isMe ? Colors.blue[800] : Colors.blue[200], decoration: TextDecoration.underline),
+      linkStyle: TextStyle(
+        color: isMe ? Colors.blue[800] : Colors.blue[200],
+        decoration: TextDecoration.underline,
+      ),
       blockquote: TextStyle(color: textColor.withValues(alpha: 0.8)),
       blockquoteBar: textColor.withValues(alpha: 0.3),
       showCaret: false,
@@ -914,9 +1318,15 @@ class ChatScreenState extends State<ChatScreen> {
 
     Widget body;
     if (mdDisabled) {
-      body = SelectionArea(child: Text(text, style: TextStyle(color: textColor, fontSize: 14)));
+      body = SelectionArea(
+        child: Text(text, style: TextStyle(color: textColor, fontSize: 14)),
+      );
     } else {
-      body = MarkdownRenderer(data: _autoLink(text), theme: markdownTheme, onTapLink: (url) => _openLink(url));
+      body = MarkdownRenderer(
+        data: _autoLink(text),
+        theme: markdownTheme,
+        onTapLink: (url) => _openLink(url),
+      );
     }
 
     final bubbleContent = Container(
@@ -939,7 +1349,14 @@ class ChatScreenState extends State<ChatScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (!isMe && isGroupOrChannel)
-            Text(_senderLabel(sender), style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: textColor)),
+            Text(
+              _senderLabel(sender),
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+                color: textColor,
+              ),
+            ),
           if (quote != null)
             GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -952,14 +1369,26 @@ class ChatScreenState extends State<ChatScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                Text(DateFormat('HH:mm').format(date), style: TextStyle(fontSize: 10, color: textColor.withValues(alpha: 0.7))),
+                Text(
+                  DateFormat('HH:mm').format(date),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: textColor.withValues(alpha: 0.7),
+                  ),
+                ),
                 if (edited) ...[
                   const SizedBox(width: 4),
-                  Text('изм.', style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: textColor.withValues(alpha: 0.7))),
+                  Text(
+                    'изм.',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontStyle: FontStyle.italic,
+                      color: textColor.withValues(alpha: 0.7),
+                    ),
+                  ),
                 ],
                 const SizedBox(width: 4),
-                _buildStatusIcons(
-                  (
+                _buildStatusIcons((
                   id: msgId,
                   clientMsgId: clientMsgId,
                   sender: sender,
@@ -971,9 +1400,7 @@ class ChatScreenState extends State<ChatScreen> {
                   readAny: readAny,
                   views: views,
                   edited: edited,
-                  ),
-                  textColor,
-                ),
+                ), textColor),
               ],
             ),
           ),
@@ -1002,12 +1429,12 @@ class ChatScreenState extends State<ChatScreen> {
 
     final gestureWrapped = GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTapUp: (details) => _handleTap(msgId, text, isMe, details.globalPosition),
+      onTapUp: (details) =>
+          _handleTap(msgId, text, isMe, details.globalPosition),
       onLongPress: () => _handleLongPress(msgId),
       child: bubbleContent,
     );
 
-    // Исправленный ключ для уникальности (учитывает локальные сообщения)
     final uniqueKey = msgId != 0 ? 'msg_$msgId' : 'client_$clientMsgId';
     final keyedBubble = KeyedSubtree(
       key: _msgKeys.putIfAbsent(uniqueKey, () => GlobalKey()),
@@ -1028,7 +1455,11 @@ class ChatScreenState extends State<ChatScreen> {
         secondaryBackground: Container(
           alignment: Alignment.centerRight,
           padding: const EdgeInsets.only(right: 28),
-          child: Icon(Icons.reply, color: Theme.of(context).colorScheme.primary, size: 24),
+          child: Icon(
+            Icons.reply,
+            color: Theme.of(context).colorScheme.primary,
+            size: 24,
+          ),
         ),
         child: keyedBubble,
       );
@@ -1059,7 +1490,10 @@ class ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: Colors.grey[100],
-        border: Border(top: BorderSide(color: Colors.grey[300]!), left: BorderSide(color: accent, width: 4)),
+        border: Border(
+          top: BorderSide(color: Colors.grey[300]!),
+          left: BorderSide(color: accent, width: 4),
+        ),
       ),
       child: Row(
         children: [
@@ -1070,8 +1504,20 @@ class ChatScreenState extends State<ChatScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(_senderLabel(reply.sender), style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: accent)),
-                Text(reply.text, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                Text(
+                  _senderLabel(reply.sender),
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    color: accent,
+                  ),
+                ),
+                Text(
+                  reply.text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: Colors.black87),
+                ),
               ],
             ),
           ),
@@ -1105,7 +1551,10 @@ class ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: Colors.grey[100],
-        border: Border(top: BorderSide(color: Colors.grey[300]!), left: BorderSide(color: accent, width: 4)),
+        border: Border(
+          top: BorderSide(color: Colors.grey[300]!),
+          left: BorderSide(color: accent, width: 4),
+        ),
       ),
       child: Row(
         children: [
@@ -1116,8 +1565,20 @@ class ChatScreenState extends State<ChatScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('Редактирование', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: accent)),
-                Text(previewText, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                Text(
+                  'Редактирование',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    color: accent,
+                  ),
+                ),
+                Text(
+                  previewText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, color: Colors.black87),
+                ),
               ],
             ),
           ),
@@ -1178,7 +1639,12 @@ class ChatScreenState extends State<ChatScreen> {
 
   Widget _buildSubscribeButton(EdgeInsets padding) {
     return Container(
-      padding: EdgeInsets.only(bottom: padding.bottom, left: 12, right: 12, top: 12),
+      padding: EdgeInsets.only(
+        bottom: padding.bottom,
+        left: 12,
+        right: 12,
+        top: 12,
+      ),
       decoration: BoxDecoration(
         color: Theme.of(context).scaffoldBackgroundColor,
         border: Border(top: BorderSide(color: Colors.grey[300]!)),
@@ -1191,7 +1657,9 @@ class ChatScreenState extends State<ChatScreen> {
             onPressed: widget.onSubscribe,
             icon: const Icon(Icons.add),
             label: const Text('Подписаться'),
-            style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+            ),
           ),
         ),
       ),
@@ -1200,7 +1668,12 @@ class ChatScreenState extends State<ChatScreen> {
 
   Widget _buildJoinButton(EdgeInsets padding) {
     return Container(
-      padding: EdgeInsets.only(bottom: padding.bottom, left: 12, right: 12, top: 12),
+      padding: EdgeInsets.only(
+        bottom: padding.bottom,
+        left: 12,
+        right: 12,
+        top: 12,
+      ),
       decoration: BoxDecoration(
         color: Theme.of(context).scaffoldBackgroundColor,
         border: Border(top: BorderSide(color: Colors.grey[300]!)),
@@ -1213,7 +1686,9 @@ class ChatScreenState extends State<ChatScreen> {
             onPressed: widget.onJoinGroup,
             icon: const Icon(Icons.group_add),
             label: const Text('Присоединиться'),
-            style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+            ),
           ),
         ),
       ),
@@ -1221,6 +1696,29 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildBottomArea(EdgeInsets inputPadding) {
+    if (widget.chatName == 'system') {
+      return Container(
+        padding: EdgeInsets.only(bottom: inputPadding.bottom, left: 16, right: 16, top: 16),
+        decoration: BoxDecoration(
+          color: Theme.of(context).scaffoldBackgroundColor,
+          border: Border(top: BorderSide(color: Colors.grey[300]!)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Center(
+            child: Text(
+              'Это служебный чат. Вы не можете сюда писать.\nЕсли есть вопросы — пишите Создателю.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.grey[600],
+                fontSize: 13,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     final isChannel = widget.chatName.startsWith('&');
     final isGroup = widget.chatName.startsWith('#');
     final isEditing = _editingMsgId != null;
@@ -1266,12 +1764,16 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   AppBar _buildNormalAppBar() {
-    final String displayName = widget.titleOverride ?? widget.chatName.replaceFirst(RegExp(r'^[#&]'), '');
+    final String displayName = widget.titleOverride ?? (widget.chatName == 'system' ? 'VartChat System' : widget.chatName.replaceFirst(RegExp(r'^[#&]'), ''));
     final bool isGroup = widget.chatName.startsWith('#');
     final bool isChannel = widget.chatName.startsWith('&');
-    final IconData leadingIcon = isGroup ? Icons.group : (isChannel ? Icons.campaign : Icons.person);
+    final bool isSystem = widget.chatName == 'system';
 
-    final presenceSubtitle = _buildPresenceSubtitle();
+    final IconData leadingIcon = isSystem
+        ? Icons.verified_user
+        : (isGroup ? Icons.group : (isChannel ? Icons.campaign : Icons.person));
+
+    final presenceWidget = _buildPresenceWidget();
 
     return AppBar(
       titleSpacing: 0,
@@ -1284,24 +1786,22 @@ class ChatScreenState extends State<ChatScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(displayName, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18)),
-                if (presenceSubtitle != null)
-                  Text(
-                    presenceSubtitle,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: widget.isOnline ? FontWeight.w600 : FontWeight.normal,
-                      color: widget.isOnline ? Colors.green : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
-                    ),
-                  ),
+                Text(
+                  displayName,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 18),
+                ),
+                if (presenceWidget != null) presenceWidget,
               ],
             ),
           ),
         ],
       ),
       leading: widget.onBack != null
-          ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: widget.onBack,
+            )
           : null,
     );
   }
@@ -1310,12 +1810,30 @@ class ChatScreenState extends State<ChatScreen> {
     final canDeleteAll = _canDeleteAllSelected();
     final canHideAll = _canHideAllSelected();
     return AppBar(
-      leading: IconButton(icon: const Icon(Icons.close), tooltip: 'Отмена', onPressed: _clearSelection),
+      leading: IconButton(
+        icon: const Icon(Icons.close),
+        tooltip: 'Отмена',
+        onPressed: _clearSelection,
+      ),
       title: Text('Выбрано: ${_selectedIds.length}'),
       actions: [
-        IconButton(icon: const Icon(Icons.copy), tooltip: 'Копировать', onPressed: _copySelected),
-        if (canDeleteAll) IconButton(icon: const Icon(Icons.delete), tooltip: 'Удалить у всех', onPressed: _deleteSelected),
-        if (canHideAll) IconButton(icon: const Icon(Icons.delete_outline), tooltip: 'Удалить у себя', onPressed: _hideSelectedForMe),
+        IconButton(
+          icon: const Icon(Icons.copy),
+          tooltip: 'Копировать',
+          onPressed: _copySelected,
+        ),
+        if (canDeleteAll)
+          IconButton(
+            icon: const Icon(Icons.delete),
+            tooltip: 'Удалить у всех',
+            onPressed: _deleteSelected,
+          ),
+        if (canHideAll)
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: 'Удалить у себя',
+            onPressed: _hideSelectedForMe,
+          ),
       ],
     );
   }
@@ -1347,19 +1865,36 @@ class ChatScreenState extends State<ChatScreen> {
           child: Stack(
             clipBehavior: Clip.none,
             children: [
-              Icon(Icons.keyboard_arrow_down, size: 24, color: Theme.of(context).colorScheme.primary),
+              Icon(
+                Icons.keyboard_arrow_down,
+                size: 24,
+                color: Theme.of(context).colorScheme.primary,
+              ),
               if (n > 0)
                 Positioned(
                   right: -8,
                   top: -8,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                    decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)),
-                    constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    constraints: const BoxConstraints(
+                      minWidth: 18,
+                      minHeight: 18,
+                    ),
                     child: Center(
                       child: Text(
                         n > 99 ? '99+' : '$n',
-                        style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ),
@@ -1373,10 +1908,16 @@ class ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    print(
+      '[TYPING UI] build ChatScreen, typingUsers = ${widget.typingUsers}',
+    ); // <--- ДОБАВИТЬ
     final msgs = widget.messages;
-    final isGroupOrChannel = widget.chatName.startsWith('#') || widget.chatName.startsWith('&');
+    final isGroupOrChannel =
+        widget.chatName.startsWith('#') || widget.chatName.startsWith('&');
     final screenWidth = MediaQuery.of(context).size.width;
-    final maxBubbleWidth = widget.isWide ? screenWidth * 0.5 : screenWidth * 0.75;
+    final maxBubbleWidth = widget.isWide
+        ? screenWidth * 0.5
+        : screenWidth * 0.75;
 
     final List<Widget> items = [];
     DateTime? lastDate;
@@ -1387,26 +1928,38 @@ class ChatScreenState extends State<ChatScreen> {
         items.add(_buildDateDivider(msgDate));
         lastDate = msgDate;
       }
-      items.add(_buildMessageBubble(
-        msg.id,
-        msg.clientMsgId,
-        msg.sender,
-        msg.text,
-        msg.isMe,
-        msg.timestamp,
-        msg.replyToId,
-        msg.readMe,
-        msg.readAny,
-        msg.views,
-        msg.edited,
-        isGroupOrChannel,
-        maxBubbleWidth,
-      ));
+      items.add(
+        _buildMessageBubble(
+          msg.id,
+          msg.clientMsgId,
+          msg.sender,
+          msg.text,
+          msg.isMe,
+          msg.timestamp,
+          msg.replyToId,
+          msg.readMe,
+          msg.readAny,
+          msg.views,
+          msg.edited,
+          isGroupOrChannel,
+          maxBubbleWidth,
+        ),
+      );
     }
 
-    final inputPadding = EdgeInsets.only(bottom: widget.isWide ? 8 : 58, left: 8, right: 8, top: 8);
-    final appBar = _selectedIds.isEmpty ? _buildNormalAppBar() : _buildSelectionAppBar();
-    final canPop = _selectedIds.isEmpty && _mdDisabledForId == null && _editingMsgId == null;
+    final inputPadding = EdgeInsets.only(
+      bottom: widget.isWide ? 8 : 58,
+      left: 8,
+      right: 8,
+      top: 8,
+    );
+    final appBar = _selectedIds.isEmpty
+        ? _buildNormalAppBar()
+        : _buildSelectionAppBar();
+    final canPop =
+        _selectedIds.isEmpty &&
+        _mdDisabledForId == null &&
+        _editingMsgId == null;
 
     return PopScope(
       canPop: canPop,
@@ -1434,10 +1987,15 @@ class ChatScreenState extends State<ChatScreen> {
                     controller: widget.scrollController,
                     reverse: true,
                     itemCount: items.length,
-                    itemBuilder: (context, index) => items[items.length - 1 - index],
+                    itemBuilder: (context, index) =>
+                        items[items.length - 1 - index],
                   ),
                   if (!_isAtBottom && msgs.isNotEmpty)
-                    Positioned(right: 16, bottom: 16, child: _buildScrollToBottomButton()),
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: _buildScrollToBottomButton(),
+                    ),
                 ],
               ),
             ),
@@ -1461,14 +2019,91 @@ class ChatScreenState extends State<ChatScreen> {
 
     widget.onSendMessage(text);
     widget.controller.clear();
-    _scrollToBottom();
+    _scrollToTop(); // Исправлено название
+  }
+
+  void _scrollToTop() {
+    final sc = widget.scrollController;
+    if (sc == null || !sc.hasClients) return;
+    final distance = sc.offset;
+    if (distance <= 0.5) return;
+    final durationMs = distance.clamp(80.0, 300.0).toInt();
+    sc.animateTo(
+      0,
+      duration: Duration(milliseconds: durationMs),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   Future<void> _openLink(String href) async {
+    if (href.startsWith('killsession:')) {
+      final token = href.substring('killsession:'.length);
+      try {
+        await widget.wsService.sendLogout(token, type: 2); // 2 = KILL_SESSION
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Запрос на отключение устройства отправлен')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Ошибка: $e')),
+          );
+        }
+      }
+      return;
+    }
     final uri = Uri.tryParse(href);
     if (uri == null) return;
     if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось открыть: $href')));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Не удалось открыть: $href')));
     }
+  }
+}
+
+class TypingIndicator extends StatefulWidget {
+  final String text;
+  final TextStyle? style;
+
+  const TypingIndicator({super.key, required this.text, this.style});
+
+  @override
+  State<TypingIndicator> createState() => _TypingIndicatorState();
+}
+
+class _TypingIndicatorState extends State<TypingIndicator> {
+  int _dotCount = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
+      if (mounted) {
+        setState(() {
+          _dotCount = (_dotCount + 1) % 4;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dots = '.' * _dotCount;
+    return Text(
+      '${widget.text}$dots',
+      style: widget.style,
+      overflow: TextOverflow.ellipsis,
+    );
   }
 }

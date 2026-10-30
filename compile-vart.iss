@@ -3,11 +3,21 @@
 ; Non-commercial use only
 
 #define MyAppName "VartChat"
-#define MyAppVersion "0.6.10"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "VartRusData"
 #define MyAppURL "https://vartrusdata.alwaysdata.net"
 #define MyAppExeName "vartchat.exe"
 
+#define NeedBuild 1
+#define FlutterProjectDir "C:\Users\builder\AndroidStudioProjects\vartchat"
+
+[Preprocessor]
+; Если NeedBuild == 1, запускаем сборку Flutter
+#if NeedBuild == 1
+  #if Exec('cmd.exe', '/c flutter build windows --release', FlutterProjectDir) != 0
+    #error "Сборка Flutter провалилась! Установщик не будет создан."
+  #endif
+#endif
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)

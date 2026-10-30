@@ -114,7 +114,7 @@ android {
             if (oldApk.exists()) {
                 val deleted = oldApk.delete()
                 println(
-                    "[build.gradle.kts] Старый APK ${if (deleted) "удалён" else "НЕ УДАЛОСЬ удалить"}: ${oldApk.name}"
+                    "[build.gradle.kts] Old APK ${if (deleted) "has been deleted" else "has NOT been deleted"}: ${oldApk.name}"
                 )
             }
         }

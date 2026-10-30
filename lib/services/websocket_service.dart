@@ -25,6 +25,10 @@ class WebSocketService {
   int? _agreedVersion;
   int? get agreedVersion => _agreedVersion;
 
+  // --- ОЧЕРЕДЬ АВТОРИЗАЦИИ ---
+  bool _isAuthenticated = false;
+  final List<Uint8List> _preAuthQueue = [];
+
   void Function(String reason)? onServerLogout;
 
   void setCredentials(String username, {String? fcmToken}) {
@@ -32,9 +36,30 @@ class WebSocketService {
     _fcmToken = fcmToken;
   }
 
+  // Вызывается, когда клиент получает "Успех" от сервера
+  void markAuthenticated() {
+    if (_isAuthenticated) return;
+    _isAuthenticated = true;
+    debugPrint('[WS] Authenticated. Flushing pre-auth queue (${_preAuthQueue.length} items).');
+    for (final packet in _preAuthQueue) {
+      _channel?.sink.add(packet);
+    }
+    _preAuthQueue.clear();
+  }
+
   void _sendData(Uint8List data) {
-    // print('[WS] sendData: длина=${data.length}');
-    _channel!.sink.add(data);
+    if (!_isAuthenticated) {
+      // Разрешаем отправлять только AUTH (0x04) и LOGOUT (0x06)
+      if (data.isNotEmpty && (data[0] == Protocol.MSG_TYPE_AUTH || data[0] == Protocol.MSG_TYPE_LOGOUT)) {
+        _channel?.sink.add(data);
+      } else {
+        // Все остальное (команды, read, сообщения) копим в очередь
+        debugPrint('[WS] Packet queued (not auth yet): type=${data.isNotEmpty ? data[0] : "empty"}');
+        _preAuthQueue.add(data);
+      }
+      return;
+    }
+    _channel?.sink.add(data);
   }
 
   Future<void> connect(String serverUrl) async {
@@ -59,7 +84,7 @@ class WebSocketService {
         if (data is Uint8List) _messageController?.add(data);
       },
       onDone: () {
-        if (_channel == channel) { // <--- Защита от Race Condition
+        if (_channel == channel) {
           _channel = null;
           _messageController?.close();
           _messageController = null;
@@ -81,7 +106,6 @@ class WebSocketService {
     await connect(server);
     final err = await performHandshake();
     if (err != null) throw Exception('Несовместимая версия протокола: $err');
-    // ЗДЕСЬ БОЛЬШЕ НЕТ sendToken!
   }
 
   Future<String?> performHandshake() async {
@@ -103,7 +127,7 @@ class WebSocketService {
       throw Exception('Handshake timeout');
     });
 
-    _sendData(Protocol.buildHandshakeHello(publicKey));
+    _channel?.sink.add(Protocol.buildHandshakeHello(publicKey));
 
     final resp = await firstResp;
 
@@ -202,9 +226,17 @@ class WebSocketService {
       result.ciphertext,
       result.nonce,
       ts,
-      cMsgId, // <--- Передаем clientMsgId вместо 0
+      cMsgId,
       replyToId: replyToId,
     );
+    _sendData(packet);
+  }
+
+  Future<void> sendTyping(int kind, String recipient) async {
+    if (_channel == null) return;
+    final sender = _currentUsername ?? '';
+    if (sender.isEmpty) return;
+    final packet = Protocol.buildTypingPacket(kind, sender, recipient);
     _sendData(packet);
   }
 
@@ -246,14 +278,23 @@ class WebSocketService {
   }
 
   Future<void> disconnect() async {
-    _channel?.sink.close(status.normalClosure);
+    _isAuthenticated = false;
+    _preAuthQueue.clear();
+
+    final oldChannel = _channel;
+    final oldController = _messageController;
+
     _channel = null;
-    _sessionKey = null;
-    await _messageController?.close();
     _messageController = null;
+    _sessionKey = null;
+
+    try {
+      await oldChannel?.sink.close(status.normalClosure).timeout(const Duration(seconds: 1));
+    } catch (_) {}
+    try {
+      await oldController?.close();
+    } catch (_) {}
   }
-
-
 
   Future<void> resetSession() async {
     await disconnect();

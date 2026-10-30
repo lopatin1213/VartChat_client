@@ -4,7 +4,7 @@ import 'dart:convert';
 class Protocol {
   // ==================== Версии протокола ====================
   static const int MIN_PROTO_VERSION = 3;
-  static const int CURRENT_PROTO_VERSION = 3;
+  static const int CURRENT_PROTO_VERSION = 4;
 
   static const int HANDSHAKE_OK = 0x00;
   static const int HANDSHAKE_REJECT = 0xFF;
@@ -212,6 +212,44 @@ class Protocol {
     packet.setAll(5, bytes);
     return packet;
   }
+  static const int MSG_TYPE_TYPING = 0x09;
+
+  static Uint8List buildTypingPacket(int kind, String sender, String recipient) {
+    final senderBytes = Uint8List.fromList(utf8.encode(sender));
+    final recipientBytes = Uint8List.fromList(utf8.encode(recipient));
+    final totalLen = 1 + 1 + 4 + senderBytes.length + 4 + recipientBytes.length;
+    final packet = Uint8List(totalLen);
+    var offset = 0;
+    packet[offset++] = MSG_TYPE_TYPING;
+    packet[offset++] = kind;
+    _writeUint32(packet, offset, senderBytes.length);
+    offset += 4;
+    packet.setAll(offset, senderBytes);
+    offset += senderBytes.length;
+    _writeUint32(packet, offset, recipientBytes.length);
+    offset += 4;
+    packet.setAll(offset, recipientBytes);
+    return packet;
+  }
+  static ({int kind, String sender, String recipient}) parseTypingPacket(Uint8List payload) {
+    if (payload.length < 1 + 4 + 4) {
+      return (kind: 0, sender: '', recipient: '');
+    }
+    var offset = 0;
+    final kind = payload[offset];
+    offset += 1;
+
+    final senderLen = _readUint32(payload, offset);
+    offset += 4;
+    final sender = utf8.decode(payload.sublist(offset, offset + senderLen), allowMalformed: true);
+    offset += senderLen;
+
+    final recipLen = _readUint32(payload, offset);
+    offset += 4;
+    final recipient = utf8.decode(payload.sublist(offset, offset + recipLen), allowMalformed: true);
+
+    return (kind: kind, sender: sender, recipient: recipient);
+  }
 
   static String readString(Uint8List data, int offset) {
     final len = _readUint32(data, offset);
@@ -269,4 +307,5 @@ class Protocol {
     data[offset + 2] = (value >> 8) & 0xFF;
     data[offset + 3] = value & 0xFF;
   }
+
 }

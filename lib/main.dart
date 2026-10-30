@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:vartchat/services/notification_service.dart';
 import 'screens/login_screen.dart';
 import 'models/message.dart';
 import 'models/chat.dart';
@@ -25,7 +26,7 @@ void main() {
 
 Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
-
+  await NotificationService.init(); // <--- ДОБАВИТЬ
   await FcmService.init();
   if (Platform.isLinux) {
     final home = Platform.environment['HOME'] ?? '.';

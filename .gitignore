@@ -50,3 +50,7 @@ app.*.map.json
 **/windows/flutter/ephemeral/
 
 /VartChat
+/output
+*.zip
+pepk.jar
+/android/build/reports/problems/problems-report.html

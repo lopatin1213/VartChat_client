@@ -1,14 +1,15 @@
 import 'dart:async';
+import 'package:awesome_notifications/awesome_notifications.dart'; // Добавлен импорт
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:vartchat/services/notification_service.dart';
 import 'screens/login_screen.dart';
 import 'models/message.dart';
 import 'models/chat.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'services/fcm_service.dart';
+import 'services/notification_service.dart';
 import 'dart:io';
 
 void main() {
@@ -26,8 +27,21 @@ void main() {
 
 Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await NotificationService.init(); // <--- ДОБАВИТЬ
+
+  await NotificationService.init();
   await FcmService.init();
+
+  // ПРОВЕРКА: Не запущено ли приложение из-за нажатия "Ответить" в шторке?
+  final initialAction = await AwesomeNotifications().getInitialNotificationAction(removeFromActionEvents: true);
+  if (initialAction != null && initialAction.buttonKeyPressed == 'REPLY') {
+    print('>>> [MAIN] Запущено из REPLY. Блокируем запуск UI.');
+    // Выполняем отправку в фоне
+    await NotificationService.onActionReceivedMethod(initialAction);
+    // Показываем пустоту, чтобы приложение не висело
+    runApp(const SizedBox());
+    return;
+  }
+
   if (Platform.isLinux) {
     final home = Platform.environment['HOME'] ?? '.';
     final configDir = Directory('$home/.config/VartChat');

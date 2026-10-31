@@ -53,4 +53,19 @@ class StorageService {
     await prefs.remove(_keyUserId);
     await _secureStorage.delete(key: _keyToken);
   }
+  static Future<void> savePendingReply(String chatKey, String text) async {
+    await _secureStorage.write(key: 'pending_reply_chat', value: chatKey);
+    await _secureStorage.write(key: 'pending_reply_text', value: text);
+  }
+
+  static Future<Map<String, String>?> getPendingReply() async {
+    final chat = await _secureStorage.read(key: 'pending_reply_chat');
+    final text = await _secureStorage.read(key: 'pending_reply_text');
+    if (chat != null && text != null) {
+      await _secureStorage.delete(key: 'pending_reply_chat');
+      await _secureStorage.delete(key: 'pending_reply_text');
+      return {'chatKey': chat, 'text': text};
+    }
+    return null;
+  }
 }

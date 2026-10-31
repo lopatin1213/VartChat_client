@@ -36,15 +36,15 @@ dependencies:
   crypto: ^3.0.3          # Для SHA-256 (не обязательно, но оставим)
   cryptography: ^2.7.0   # уже должна быть
   web_socket_channel: ^3.0.1
-  shared_preferences: ^2.2.2
+  shared_preferences: ^2.5.6
   flutter_secure_storage: ^11.2.0
   hive: ^2.2.3
   hive_flutter: ^1.1.0
   provider: ^6.1.1
   intl: ^0.20.3
   uuid: ^4.3.3
-  firebase_core: ^5.0.0
-  firebase_analytics: ^13.0.0
+  firebase_core: ^5.1.0
+  firebase_analytics: ^13.0.1
 
   #firebase
 
@@ -57,7 +57,8 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^2.0.0
   msix: ^3.18.0
-  awesome_notifications: ^0.9.3
+  awesome_notifications: ^0.12.1
+  share_plus: ^13.3.1
 
 dev_dependencies:
   flutter_test:

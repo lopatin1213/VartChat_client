@@ -2,14 +2,12 @@ import 'dart:typed_data';
 import 'dart:convert';
 
 class Protocol {
-  // ==================== Версии протокола ====================
   static const int MIN_PROTO_VERSION = 3;
   static const int CURRENT_PROTO_VERSION = 4;
 
   static const int HANDSHAKE_OK = 0x00;
   static const int HANDSHAKE_REJECT = 0xFF;
 
-  // ==================== MSG_TYPES ====================
   static const int MSG_TYPE_USER = 0x01;
   static const int MSG_TYPE_SYSTEM = 0x02;
   static const int MSG_TYPE_COMMAND = 0x03;
@@ -18,9 +16,11 @@ class Protocol {
   static const int MSG_TYPE_LOGOUT = 0x06;
   static const int MSG_TYPE_READ = 0x07;
   static const int MSG_TYPE_EDIT = 0x08;
+  static const int MSG_TYPE_TYPING = 0x09;
 
   static const int LOGOUT_TYPE_EXIT = 0;
   static const int LOGOUT_TYPE_DELETE_ACCOUNT = 1;
+  static const int LOGOUT_TYPE_KILL_SESSION = 2;
 
   static const int MSG_KIND_PERSONAL = 1;
   static const int MSG_KIND_GROUP = 2;
@@ -29,9 +29,8 @@ class Protocol {
   static const int MSG_DELETE_FOR_ALL = 0;
   static const int MSG_DELETE_FOR_ME = 1;
 
-  /// C→S 0x04 (AUTH v3): [0x04][nonce 12][enc_len u32][enc]
-  static Uint8List buildEncryptedAuthPacket(Uint8List nonce, Uint8List encrypted) {
-    final totalLen = 1 + 12 + 4 + encrypted.length;
+  static Uint8List buildEncryptedAuthPacket(Uint8List nonce, Uint8List encrypted, bool isBackground) {
+    final totalLen = 1 + 12 + 4 + encrypted.length + 1;
     final packet = Uint8List(totalLen);
     var offset = 0;
     packet[offset++] = MSG_TYPE_AUTH;
@@ -40,10 +39,11 @@ class Protocol {
     _writeUint32(packet, offset, encrypted.length);
     offset += 4;
     packet.setAll(offset, encrypted);
+    offset += encrypted.length;
+    packet[offset] = isBackground ? 1 : 0;
     return packet;
   }
 
-  /// C→S 0x06 (LOGOUT v3): [0x06][nonce 12][enc_len u32][enc]
   static Uint8List buildEncryptedLogoutPacket(Uint8List nonce, Uint8List encrypted) {
     final totalLen = 1 + 12 + 4 + encrypted.length;
     final packet = Uint8List(totalLen);
@@ -63,8 +63,8 @@ class Protocol {
       Uint8List encrypted,
       Uint8List nonce,
       int timestamp,
-      int clientMsgId, // <--- ИЗМЕНЕНО: вместо msgId
-          {int replyToId = 0}) {
+      int clientMsgId,
+      {int replyToId = 0}) {
     final senderBytes = Uint8List.fromList(utf8.encode(sender));
     final recipientBytes = Uint8List.fromList(utf8.encode(recipient));
     final totalLen = 1 + 4 + senderBytes.length + 4 + recipientBytes.length + 12 + 4 + encrypted.length + 8 + 8 + 8;
@@ -90,7 +90,7 @@ class Protocol {
     packet.setAll(offset, tsBytes);
     offset += 8;
     final idBytes = Uint8List(8);
-    ByteData.sublistView(idBytes).setInt64(0, clientMsgId, Endian.big); // Пишем clientMsgId
+    ByteData.sublistView(idBytes).setInt64(0, clientMsgId, Endian.big);
     packet.setAll(offset, idBytes);
     offset += 8;
     final replyBytes = Uint8List(8);
@@ -155,7 +155,7 @@ class Protocol {
     final packet = Uint8List(totalLen);
     var offset = 0;
     packet[offset++] = MSG_TYPE_DELETE;
-    ByteData.sublistView(packet, offset, offset + 8).setInt64(0, 0, Endian.big); // msgId = 0
+    ByteData.sublistView(packet, offset, offset + 8).setInt64(0, 0, Endian.big);
     offset += 8;
     packet[offset++] = kind;
     packet[offset++] = type;
@@ -212,7 +212,6 @@ class Protocol {
     packet.setAll(5, bytes);
     return packet;
   }
-  static const int MSG_TYPE_TYPING = 0x09;
 
   static Uint8List buildTypingPacket(int kind, String sender, String recipient) {
     final senderBytes = Uint8List.fromList(utf8.encode(sender));
@@ -231,23 +230,17 @@ class Protocol {
     packet.setAll(offset, recipientBytes);
     return packet;
   }
+
   static ({int kind, String sender, String recipient}) parseTypingPacket(Uint8List payload) {
     if (payload.length < 1 + 4 + 4) {
       return (kind: 0, sender: '', recipient: '');
     }
     var offset = 0;
-    final kind = payload[offset];
-    offset += 1;
-
-    final senderLen = _readUint32(payload, offset);
-    offset += 4;
-    final sender = utf8.decode(payload.sublist(offset, offset + senderLen), allowMalformed: true);
-    offset += senderLen;
-
-    final recipLen = _readUint32(payload, offset);
-    offset += 4;
+    final kind = payload[offset]; offset += 1;
+    final senderLen = _readUint32(payload, offset); offset += 4;
+    final sender = utf8.decode(payload.sublist(offset, offset + senderLen), allowMalformed: true); offset += senderLen;
+    final recipLen = _readUint32(payload, offset); offset += 4;
     final recipient = utf8.decode(payload.sublist(offset, offset + recipLen), allowMalformed: true);
-
     return (kind: kind, sender: sender, recipient: recipient);
   }
 
@@ -307,5 +300,4 @@ class Protocol {
     data[offset + 2] = (value >> 8) & 0xFF;
     data[offset + 3] = value & 0xFF;
   }
-
 }

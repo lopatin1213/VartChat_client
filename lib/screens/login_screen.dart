@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
@@ -14,7 +16,6 @@ import '../services/database_service.dart';
 import '../services/fcm_service.dart';
 import '../models/message.dart';
 import 'chat_list_screen.dart';
-import 'dart:io';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -45,8 +46,20 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSavedServer();
-    _tryRestoreSession();
+    // Инициализируем последовательно, чтобы не было гонки сокетов
+    _initSequence();
+  }
+
+  Future<void> _initSequence() async {
+    await _loadSavedServer();
+
+    // Ждем, пока пользователь выберет сервер (если дебаг)
+    await _checkDebugServer();
+
+    // Только после выбора сервера пытаемся восстановить сессию
+    if (mounted) {
+      await _tryRestoreSession();
+    }
   }
 
   @override
@@ -58,6 +71,49 @@ class _LoginScreenState extends State<LoginScreen> {
     _usernameController.dispose();
     _subscription?.cancel();
     super.dispose();
+  }
+
+  Future<void> _checkDebugServer() async {
+    if (!kDebugMode || !mounted) return;
+
+    final String debugUrl = (Platform.isLinux || Platform.isWindows)
+        ? 'localhost:8100'
+        : 'ws://192.168.1.208:8100';
+
+    const String prodUrl = 'vartchat.alwaysdata.net';
+
+    final bool? useDebug = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Debug Mode'),
+        content: Text('Использовать локальный сервер?\n\nДа: $debugUrl\nНет: $prodUrl'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Нет (Прод)'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Да (Локальный)'),
+          ),
+        ],
+      ),
+    );
+
+    if (useDebug == null) return;
+
+    final String newServer = useDebug ? debugUrl : prodUrl;
+
+    if (_serverAddress != newServer) {
+      await StorageService.clearAll();
+      setState(() {
+        _serverAddress = newServer;
+        _errorMessage = null;
+        _authSuccess = false;
+        _historyMessages.clear();
+      });
+      await StorageService.saveServer(newServer);
+    }
   }
 
   Future<void> _loadSavedServer() async {
@@ -77,10 +133,12 @@ class _LoginScreenState extends State<LoginScreen> {
     }
     return deviceId;
   }
+
   Future<String> _getDeviceName() async {
     final prefs = await SharedPreferences.getInstance();
     const key = 'deviceName';
     String? name = prefs.getString(key);
+
     if (name == null) {
       final deviceId = await _getDeviceId();
       final os = Platform.operatingSystem;
@@ -149,17 +207,14 @@ class _LoginScreenState extends State<LoginScreen> {
         _subscription = _wsService.onMessage.listen(
           _handleIncomingMessage,
           onDone: () {
-            // Сервер закрыл соединение
             if (mounted && _isLoading) {
               setState(() {
-                _errorMessage =
-                    'Соединение закрыто сервером (возможно, вы заблокированы)';
+                _errorMessage = 'Соединение закрыто сервером';
                 _isLoading = false;
               });
             }
           },
           onError: (e) {
-            // Ошибка сети
             if (mounted && _isLoading) {
               setState(() {
                 _errorMessage = 'Ошибка сети: $e';
@@ -173,21 +228,19 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       if (restoreToken != null) {
-        await _wsService
-            .sendToken(restoreToken, fcmToken: FcmService.token)
-            .timeout(
-              const Duration(seconds: 7),
-              onTimeout: () {
-                throw Exception('Таймаут авторизации');
-              },
-            );
+        await _wsService.sendToken(restoreToken, fcmToken: FcmService.token)
+            .timeout(const Duration(seconds: 7), onTimeout: () {
+          throw Exception('Таймаут авторизации');
+        });
       } else {
         final phone = _phoneController.text.trim();
         final password = _passwordController.text.trim();
         if (phone.isEmpty || password.isEmpty) {
           throw Exception('Телефон и пароль обязательны');
         }
+
         final deviceName = await _getDeviceName();
+
         if (_isRegister) {
           final firstName = _firstNameController.text.trim();
           final lastName = _lastNameController.text.trim();
@@ -233,9 +286,7 @@ class _LoginScreenState extends State<LoginScreen> {
       barrierDismissible: false,
       builder: (_) => AlertDialog(
         title: const Text('Несовместимая версия'),
-        content: Text(
-          'Сервер сообщил: $reason\n\nОбновите приложение, чтобы продолжить.',
-        ),
+        content: Text('Сервер сообщил: $reason\n\nОбновите приложение, чтобы продолжить.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -269,8 +320,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
-        print("Получен $text от Системы");
-        // --- ДОБАВЛЕНО: Проверка на бан ---
+
         if (text.contains('Недействительный токен') ||
             text.contains('Ошибка восстановления') ||
             text.contains('Неверный телефон') ||
@@ -286,11 +336,12 @@ class _LoginScreenState extends State<LoginScreen> {
           _wsService.disconnect();
           return;
         }
+
         if (text.contains('Вы заблокированы')) {
           _subscription?.cancel();
           _subscription = null;
           setState(() {
-            _errorMessage = 'Ошибка: $text. Вы не можете войти.';
+            _errorMessage = text;
             _isLoading = false;
           });
           StorageService.clearAll();
@@ -298,7 +349,6 @@ class _LoginScreenState extends State<LoginScreen> {
           _wsService.disconnect();
           return;
         }
-        // ----------------------------------
 
         if (text.startsWith('Успех|') && !_authSuccess) {
           _authSuccess = true;
@@ -319,9 +369,7 @@ class _LoginScreenState extends State<LoginScreen> {
               _subscription?.cancel();
               _subscription = null;
               await DatabaseService.clearData();
-              _historyMessages.sort(
-                (a, b) => a.timestamp.compareTo(b.timestamp),
-              );
+              _historyMessages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
               for (var msg in _historyMessages) {
                 DatabaseService.saveMessage(msg);
               }
@@ -346,34 +394,26 @@ class _LoginScreenState extends State<LoginScreen> {
         if (key == null) return;
 
         try {
-          CryptoService.decryptAesGcm(
-                parsedUser.encrypted,
-                key,
-                parsedUser.nonce,
-              )
-              .then((plaintext) {
-                final text = utf8.decode(plaintext, allowMalformed: true);
-                final isMe = (parsedUser.sender == _currentUsername);
-                final message = ChatMessage(
-                  id: parsedUser.msgId,
-                  sender: parsedUser.sender,
-                  recipient: parsedUser.recipient,
-                  text: text,
-                  isMe: isMe,
-                  timestamp: DateTime.fromMillisecondsSinceEpoch(
-                    parsedUser.timestamp,
-                  ),
-                  replyToId: parsedUser.replyToId,
-                  readMe: parsedUser.flagMe,
-                  readAny: parsedUser.flagAny,
-                  views: parsedUser.views,
-                  edited: parsedUser.edited,
-                );
-                _historyMessages.add(message);
-              })
-              .catchError((e) {
-                print('[UI] Ошибка расшифровки: $e');
-              });
+          CryptoService.decryptAesGcm(parsedUser.encrypted, key, parsedUser.nonce).then((plaintext) {
+            final text = utf8.decode(plaintext, allowMalformed: true);
+            final isMe = (parsedUser.sender == _currentUsername);
+            final message = ChatMessage(
+              id: parsedUser.msgId,
+              sender: parsedUser.sender,
+              recipient: parsedUser.recipient,
+              text: text,
+              isMe: isMe,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(parsedUser.timestamp),
+              replyToId: parsedUser.replyToId,
+              readMe: parsedUser.flagMe,
+              readAny: parsedUser.flagAny,
+              views: parsedUser.views,
+              edited: parsedUser.edited,
+            );
+            _historyMessages.add(message);
+          }).catchError((e) {
+            print('[UI] Ошибка расшифровки: $e');
+          });
         } catch (e) {
           print('[UI] Ошибка расшифровки: $e');
         }
@@ -391,9 +431,7 @@ class _LoginScreenState extends State<LoginScreen> {
         title: const Text('Адрес сервера'),
         content: TextField(
           controller: controller,
-          decoration: const InputDecoration(
-            hintText: 'например, vartchat.alwaysdata.net',
-          ),
+          decoration: const InputDecoration(hintText: 'например, vartchat.alwaysdata.net'),
         ),
         actions: [
           TextButton(
@@ -404,6 +442,9 @@ class _LoginScreenState extends State<LoginScreen> {
             onPressed: () {
               final newAddress = controller.text.trim();
               if (newAddress.isNotEmpty) {
+                if (newAddress != _serverAddress) {
+                  StorageService.clearAll();
+                }
                 setState(() {
                   _serverAddress = newAddress;
                   _errorMessage = null;
@@ -450,47 +491,23 @@ class _LoginScreenState extends State<LoginScreen> {
                     const TextSpan(text: 'Я даю согласие на '),
                     TextSpan(
                       text: 'обработку персональных данных',
-                      style: const TextStyle(
-                        color: Colors.blue,
-                        decoration: TextDecoration.underline,
-                      ),
+                      style: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
                       recognizer: TapGestureRecognizer()
-                        ..onTap = () => launchUrl(
-                          Uri.parse(
-                            'https://vartrusdata.alwaysdata.net/coglpersdanvartchat.html',
-                          ),
-                          mode: LaunchMode.externalApplication,
-                        ),
+                        ..onTap = () => launchUrl(Uri.parse('https://vartrusdata.alwaysdata.net/coglpersdanvartchat.html'), mode: LaunchMode.externalApplication),
                     ),
                     const TextSpan(text: ', а также я прочитал(а) '),
                     TextSpan(
                       text: 'политику конфиденциальности',
-                      style: const TextStyle(
-                        color: Colors.blue,
-                        decoration: TextDecoration.underline,
-                      ),
+                      style: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
                       recognizer: TapGestureRecognizer()
-                        ..onTap = () => launchUrl(
-                          Uri.parse(
-                            'https://vartrusdata.alwaysdata.net/pkvartchat.html?v=2',
-                          ),
-                          mode: LaunchMode.externalApplication,
-                        ),
+                        ..onTap = () => launchUrl(Uri.parse('https://vartrusdata.alwaysdata.net/pkvartchat.html?v=2'), mode: LaunchMode.externalApplication),
                     ),
                     const TextSpan(text: ' и '),
                     TextSpan(
                       text: 'условия пользования',
-                      style: const TextStyle(
-                        color: Colors.blue,
-                        decoration: TextDecoration.underline,
-                      ),
+                      style: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
                       recognizer: TapGestureRecognizer()
-                        ..onTap = () => launchUrl(
-                          Uri.parse(
-                            'https://vartrusdata.alwaysdata.net/ypvartchat.html?v=2',
-                          ),
-                          mode: LaunchMode.externalApplication,
-                        ),
+                        ..onTap = () => launchUrl(Uri.parse('https://vartrusdata.alwaysdata.net/ypvartchat.html?v=2'), mode: LaunchMode.externalApplication),
                     ),
                     const TextSpan(text: ' и согласен(сна) с ними.'),
                   ],
@@ -525,11 +542,7 @@ class _LoginScreenState extends State<LoginScreen> {
             Text('VartChat', style: Theme.of(context).textTheme.headlineLarge),
             const SizedBox(height: 32),
             if (_errorMessage != null) ...[
-              Text(
-                _errorMessage!,
-                style: const TextStyle(color: Colors.red),
-                textAlign: TextAlign.center,
-              ),
+              Text(_errorMessage!, style: const TextStyle(color: Colors.red), textAlign: TextAlign.center),
               const SizedBox(height: 16),
             ],
             TextField(

@@ -7,12 +7,25 @@ import '../firebase_options.dart';
 import 'notification_service.dart';
 
 // Фоновый обработчик (обязателен для data-only пушей)
+
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  await NotificationService.init();
-  await NotificationService.showNotification(message.data);
+  print('>>> [BG] Фоновый обработчик запущен!');
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+    // Инициализируем БЕЗ запроса разрешений, чтобы не крашить фоновый изолят
+    await NotificationService.init(requestPermission: false);
+
+    print('>>> [BG] Данные пуша: ${message.data}');
+    await NotificationService.showNotification(message.data);
+    print('>>> [BG] Уведомление показано!');
+  } catch (e, stacktrace) {
+    print('>>> [BG] ОШИБКА: $e');
+    print('>>> [BG] Stacktrace: $stacktrace');
+  }
 }
+
 
 class FcmService {
   static String? _token;
@@ -26,7 +39,6 @@ class FcmService {
           options: DefaultFirebaseOptions.currentPlatform,
         );
 
-        // Регистрируем фоновый обработчик
         FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
         await FirebaseMessaging.instance.requestPermission();
@@ -38,12 +50,12 @@ class FcmService {
           _token = newToken;
         });
 
-        // Приложение открыто (foreground)
+        // Передний план
         FirebaseMessaging.onMessage.listen((RemoteMessage message) {
           NotificationService.showNotification(message.data);
         });
 
-        // Приложение было в фоне, пользователь нажал на пуш
+        // Клик по пушу (приложение в фоне)
         FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
           final chatKey = message.data['chatKey'];
           if (chatKey != null && chatKey.isNotEmpty) {

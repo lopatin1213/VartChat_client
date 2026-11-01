@@ -25,7 +25,6 @@ class WebSocketService {
   int? _agreedVersion;
   int? get agreedVersion => _agreedVersion;
 
-  // --- ОЧЕРЕДЬ АВТОРИЗАЦИИ ---
   bool _isAuthenticated = false;
   final List<Uint8List> _preAuthQueue = [];
 
@@ -36,7 +35,6 @@ class WebSocketService {
     _fcmToken = fcmToken;
   }
 
-  // Вызывается, когда клиент получает "Успех" от сервера
   void markAuthenticated() {
     if (_isAuthenticated) return;
     _isAuthenticated = true;
@@ -49,11 +47,9 @@ class WebSocketService {
 
   void _sendData(Uint8List data) {
     if (!_isAuthenticated) {
-      // Разрешаем отправлять только AUTH (0x04) и LOGOUT (0x06)
       if (data.isNotEmpty && (data[0] == Protocol.MSG_TYPE_AUTH || data[0] == Protocol.MSG_TYPE_LOGOUT)) {
         _channel?.sink.add(data);
       } else {
-        // Все остальное (команды, read, сообщения) копим в очередь
         debugPrint('[WS] Packet queued (not auth yet): type=${data.isNotEmpty ? data[0] : "empty"}');
         _preAuthQueue.add(data);
       }
@@ -61,8 +57,8 @@ class WebSocketService {
     }
     _channel?.sink.add(data);
   }
-
-  Future<void> connect(String serverUrl) async {
+  Future<void> connect(String serverUrl, {bool enablePing = true}) async {
+    print('>>> [WS BG] connect() called with url=$serverUrl');
     await disconnect();
     if (serverUrl.trim().isEmpty) throw Exception('Адрес сервера не может быть пустым');
 
@@ -71,11 +67,18 @@ class WebSocketService {
     if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
       url = (url.startsWith('localhost') || url.startsWith('127.0.0.1')) ? 'ws://$url' : 'wss://$url';
     }
+    print('>>> [WS BG] Final url: $url');
 
-    final channel = IOWebSocketChannel.connect(Uri.parse(url), pingInterval: const Duration(seconds: 5));
+    final channel = IOWebSocketChannel.connect(
+      Uri.parse(url),
+      pingInterval: enablePing ? const Duration(seconds: 5) : null,
+    );
     _channel = channel;
 
-    channel.ready.catchError((e) {
+    channel.ready.then((_) {
+      print('>>> [WS BG] Channel ready!');
+    }).catchError((e) {
+      print('>>> [WS BG] Channel ready error: $e');
       if (_channel == channel) _channel = null;
     });
 
@@ -84,6 +87,7 @@ class WebSocketService {
         if (data is Uint8List) _messageController?.add(data);
       },
       onDone: () {
+        print('>>> [WS BG] Channel stream onDone');
         if (_channel == channel) {
           _channel = null;
           _messageController?.close();
@@ -91,6 +95,7 @@ class WebSocketService {
         }
       },
       onError: (error) {
+        print('>>> [WS BG] Channel stream onError: $error');
         if (_channel == channel) {
           _channel = null;
           _messageController?.addError(error);
@@ -109,6 +114,7 @@ class WebSocketService {
   }
 
   Future<String?> performHandshake() async {
+    print('>>> [WS BG] performHandshake() start');
     if (_channel == null || _messageController == null) {
       throw Exception('Not connected');
     }
@@ -127,31 +133,33 @@ class WebSocketService {
       throw Exception('Handshake timeout');
     });
 
+    print('>>> [WS BG] Sending HandshakeHello...');
     _channel?.sink.add(Protocol.buildHandshakeHello(publicKey));
 
     final resp = await firstResp;
+    print('>>> [WS BG] Got handshake response, length: ${resp.length}');
 
     if (resp.length == 32) {
-      debugPrint('[WS] Старый сервер (v1), без версии в ответе');
       final serverPublicKey = resp;
       final sharedSecret = CryptoService.computeSharedSecret(privateKey, serverPublicKey);
       _sessionKey = await CryptoService.deriveKey(sharedSecret);
       _agreedVersion = 1;
+      print('>>> [WS BG] Handshake OK v1 (old)');
       return null;
     }
 
     final parsed = Protocol.parseHandshakeResponse(resp);
     if (!parsed.ok) {
-      debugPrint('[WS] Handshake отклонён: ${parsed.reason}');
+      print('>>> [WS BG] Handshake reject: ${parsed.reason}');
       return parsed.reason ?? 'Несовместимая версия протокола';
     }
 
     _agreedVersion = parsed.agreedVersion;
     final serverPublicKey = parsed.serverKey!;
-    debugPrint('[WS] Handshake OK, протокол v$_agreedVersion');
 
     final sharedSecret = CryptoService.computeSharedSecret(privateKey, serverPublicKey);
     _sessionKey = await CryptoService.deriveKey(sharedSecret);
+    print('>>> [WS BG] Handshake OK v$_agreedVersion');
 
     return null;
   }
@@ -165,6 +173,7 @@ class WebSocketService {
         String? username,
         String device = 'flutter',
         String? fcmToken,
+        bool isBackground = false,
       }) async {
     if (_channel == null || _sessionKey == null) throw Exception('Not ready');
 
@@ -177,19 +186,19 @@ class WebSocketService {
 
     final plaintext = Uint8List.fromList(utf8.encode(authData));
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
-    final packet = Protocol.buildEncryptedAuthPacket(result.nonce, result.ciphertext);
+    final packet = Protocol.buildEncryptedAuthPacket(result.nonce, result.ciphertext, isBackground);
 
     await DatabaseService.clearData();
     _sendData(packet);
   }
 
-  Future<void> sendToken(String token, {String? fcmToken, String device = 'flutter'}) async {
+  Future<void> sendToken(String token, {String? fcmToken, String device = 'flutter', bool isBackground = false}) async {
     if (_channel == null || _sessionKey == null) throw Exception('Not ready');
 
     final authData = "token|$token|$device|${fcmToken ?? _fcmToken ?? ''}";
     final plaintext = Uint8List.fromList(utf8.encode(authData));
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
-    final packet = Protocol.buildEncryptedAuthPacket(result.nonce, result.ciphertext);
+    final packet = Protocol.buildEncryptedAuthPacket(result.nonce, result.ciphertext, isBackground);
 
     _sendData(packet);
   }

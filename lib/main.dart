@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:awesome_notifications/awesome_notifications.dart'; // Добавлен импорт
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -8,6 +9,7 @@ import 'models/message.dart';
 import 'models/chat.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'services/fcm_service.dart';
+import 'services/notification_service.dart';
 import 'dart:io';
 
 void main() {
@@ -26,7 +28,22 @@ void main() {
 Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // ВАЖНО: Сначала инициализируем плагин!
+  await NotificationService.init();
   await FcmService.init();
+
+  // ПРОВЕРКА: Не запущено ли приложение из-за нажатия "Ответить" в шторке?
+  final initialAction = await AwesomeNotifications().getInitialNotificationAction(removeFromActionEvents: true);
+
+  // ДОБАВЬ ВОТ ЭТОТ ЛОГ:
+  print('>>> [MAIN] initialAction: $initialAction');
+
+  if (initialAction != null && initialAction.buttonKeyPressed == 'REPLY') {
+    print('>>> [MAIN] Запущено из REPLY. Блокируем запуск UI.');
+    await NotificationService.onActionReceivedMethod(initialAction);
+    runApp(const SizedBox());
+    return;
+  }
   if (Platform.isLinux) {
     final home = Platform.environment['HOME'] ?? '.';
     final configDir = Directory('$home/.config/VartChat');

@@ -1,6 +1,9 @@
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/foundation.dart';
-import 'storage_service.dart';
+import 'package:flutter/widgets.dart';
+import 'background_sender.dart';
+
+@pragma('vm:entry-point')
 class NotificationService {
   static const String personalChannelKey = 'personal_chat_channel';
   static const String groupChannelKey = 'group_chat_channel';
@@ -43,6 +46,10 @@ class NotificationService {
       ],
     );
 
+    AwesomeNotifications().setListeners(
+      onActionReceivedMethod: onActionReceivedMethod,
+    );
+
     if (requestPermission) {
       await AwesomeNotifications().requestPermissionToSendNotifications();
     }
@@ -59,10 +66,25 @@ class NotificationService {
       return;
     }
 
+    // Вычисляем kindInt для 0x07 (1=personal, 2=group, 3=channel)
+    int kindInt = 1;
+    if (kind == 'group') kindInt = 2;
+    else if (kind == 'channel') kindInt = 3;
+
     final String title = data['title'] ?? 'VartChat';
     final String body = data['body'] ?? '';
     final String? fullText = data['full_text'];
-    final String? chatKey = data['chatKey'];
+
+    String? chatKey = data['chatKey'];
+    if (chatKey == null || chatKey.isEmpty) {
+      if (kind == 'personal') {
+        chatKey = data['sender'];
+      } else if (kind == 'group' && data['group'] != null) {
+        chatKey = '#${data['group']}';
+      } else if (kind == 'channel' && data['channel'] != null) {
+        chatKey = '&${data['channel']}';
+      }
+    }
 
     String channelKey = personalChannelKey;
     if (kind == 'group') {
@@ -96,7 +118,11 @@ class NotificationService {
         notificationLayout: imageUrl != null
             ? NotificationLayout.BigPicture
             : NotificationLayout.Default,
-        payload: {'chatKey': chatKey ?? ''},
+        payload: {
+          'chatKey': chatKey ?? '',
+          'kind': kindInt.toString(),
+          'msgId': msgId.toString(),
+        },
       ),
       actionButtons: [
         NotificationActionButton(
@@ -104,12 +130,13 @@ class NotificationService {
           label: 'Ответить',
           requireInputText: true,
           autoDismissible: true,
+          actionType: ActionType.SilentAction,
         ),
         NotificationActionButton(
           key: 'MARK_AS_READ',
           label: 'Прочитано',
           autoDismissible: true,
-          actionType: ActionType.DisabledAction,
+          actionType: ActionType.SilentAction,
         ),
       ],
     );
@@ -117,14 +144,29 @@ class NotificationService {
 
   @pragma('vm:entry-point')
   static Future<void> onActionReceivedMethod(ReceivedAction receivedAction) async {
-    await AwesomeNotifications().cancelAll();
+    WidgetsFlutterBinding.ensureInitialized();
 
-    final text = receivedAction.buttonKeyInput;
-    final chatKey = receivedAction.payload?['chatKey'];
+    final payload = receivedAction.payload;
+    final String? chatKey = payload?['chatKey'];
+    final String? kindStr = payload?['kind'];
+    final String? msgIdStr = payload?['msgId'];
 
-    if (receivedAction.buttonKeyPressed == 'REPLY' && text != null && chatKey != null) {
-      print('>>> [ACTION] Сохраняем ответ в SecureStorage');
-      await StorageService.savePendingReply(chatKey, text);
+    final int kind = int.tryParse(kindStr ?? '') ?? 1;
+    final int msgId = int.tryParse(msgIdStr ?? '') ?? (receivedAction.id ?? DateTime.now().millisecondsSinceEpoch);
+
+    if (receivedAction.buttonKeyPressed == 'REPLY') {
+      final text = receivedAction.buttonKeyInput;
+      if (text.isNotEmpty && chatKey != null && chatKey.isNotEmpty) {
+        debugPrint('>>> [ACTION] Перехвачен "Ответить". Передаем в BackgroundSender.');
+        await AwesomeNotifications().cancelAll();
+        await BackgroundSender.sendReply(chatKey, text, msgId);
+      }
+    } else if (receivedAction.buttonKeyPressed == 'MARK_AS_READ') {
+      if (chatKey != null && chatKey.isNotEmpty && msgId > 0) {
+        debugPrint('>>> [ACTION] Перехвачен "Прочитано". Передаем в BackgroundSender.');
+        await AwesomeNotifications().cancelAll();
+        await BackgroundSender.markAsRead(chatKey, kind, msgId);
+      }
     }
   }
 }

@@ -28,20 +28,22 @@ void main() {
 Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // ВАЖНО: Сначала инициализируем плагин!
   await NotificationService.init();
   await FcmService.init();
 
   // ПРОВЕРКА: Не запущено ли приложение из-за нажатия "Ответить" в шторке?
   final initialAction = await AwesomeNotifications().getInitialNotificationAction(removeFromActionEvents: true);
+
+  // ДОБАВЬ ВОТ ЭТОТ ЛОГ:
+  print('>>> [MAIN] initialAction: $initialAction');
+
   if (initialAction != null && initialAction.buttonKeyPressed == 'REPLY') {
     print('>>> [MAIN] Запущено из REPLY. Блокируем запуск UI.');
-    // Выполняем отправку в фоне
     await NotificationService.onActionReceivedMethod(initialAction);
-    // Показываем пустоту, чтобы приложение не висело
     runApp(const SizedBox());
     return;
   }
-
   if (Platform.isLinux) {
     final home = Platform.environment['HOME'] ?? '.';
     final configDir = Directory('$home/.config/VartChat');

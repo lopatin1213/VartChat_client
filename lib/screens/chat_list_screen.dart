@@ -279,7 +279,13 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   void _loadMessagesFromHive() {
     final allMessages = DatabaseService.getAllMessages();
-    allMessages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    // Сортируем по ID сервера (если он есть), чтобы избежать рассинхрона времени
+    allMessages.sort((a, b) {
+      if (a.id > 0 && b.id > 0) {
+        return a.id.compareTo(b.id);
+      }
+      return a.timestamp.compareTo(b.timestamp);
+    });
     for (var msg in allMessages) {
       final chatKey = _chatKeyFor(msg.sender, msg.recipient, msg.isMe);
       _messages.putIfAbsent(chatKey, () => []);
@@ -360,7 +366,13 @@ class _ChatListScreenState extends State<ChatListScreen>
       edited: edited,
       );
       list.add(merged);
-      list.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      // Сортируем по ID сервера, чтобы избежать рассинхрона времени
+      list.sort((a, b) {
+        if (a.id > 0 && b.id > 0) {
+          return a.id.compareTo(b.id);
+        }
+        return a.timestamp.compareTo(b.timestamp);
+      });
     }
 
     if (merged.id == 0) return;

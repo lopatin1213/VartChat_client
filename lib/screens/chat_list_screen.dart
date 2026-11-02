@@ -13,7 +13,8 @@ import '../services/fcm_service.dart';
 import '../models/message.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
-
+import 'settings_screen.dart';
+import 'user_profile_screen.dart';
 
 enum ViewMode { chats, contacts, groups, channels }
 
@@ -554,7 +555,8 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   void _refreshChats() {
     try {
-      widget.wsService.sendCommand('/listusers');
+      // Теперь запрашиваем только тех, с кем есть история
+      widget.wsService.sendCommand('/listusers history');
       widget.wsService.sendCommand('/listgroups');
       widget.wsService.sendCommand('/channels');
       widget.wsService.sendCommand('/onlineusers');
@@ -609,6 +611,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
       final token = await StorageService.getToken();
       if (token != null) {
+        print("[Chat List UI]: Отправляем токен");
         await widget.wsService.sendToken(token, fcmToken: FcmService.token);
       } else {
         _logout();
@@ -666,6 +669,24 @@ class _ChatListScreenState extends State<ChatListScreen>
 
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
+
+        // --- ОБРАБОТКА УСПЕШНОЙ АВТОРИЗАЦИИ ---
+        if (text.startsWith('Успех|')) {
+          print('>>> [UI] Получен Успех при реконнекте');
+          widget.wsService.markAuthenticated(); // Разблокируем очередь
+
+          if (mounted) {
+            setState(() {
+              _isConnecting = false;
+            });
+          }
+
+          _flushOutbox(); // Отправляем то, что застряло в очереди
+          _checkPendingReply(); // Проверяем, нет ли ответа из уведомления
+
+          return;
+        }
+        // ----------------------------------------
 
         if (text.contains('Вы заблокированы')) {
           _logout();
@@ -814,6 +835,14 @@ class _ChatListScreenState extends State<ChatListScreen>
                 ..clear()
                 ..addAll(newLastSeen);
             });
+          }
+          // ЛОВУШКА ДЛЯ НЕИЗВЕСТНЫХ СИСТЕМНЫХ КОМАНД
+          // Если мы дошли до сюда, значит ни один из if выше не сработал.
+          // Показываем текст пользователю, чтобы он видел ответ сервера.
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(text)),
+            );
           }
           if (_isConnecting && mounted) setState(() => _isConnecting = false);
           return;
@@ -1913,6 +1942,22 @@ class _ChatListScreenState extends State<ChatListScreen>
             onTap: () {
               Navigator.pop(context);
               _showDeleteAccountDialog();
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings),
+            title: const Text('Настройки'),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => SettingsScreen(
+                    wsService: widget.wsService,
+                    username: widget.username,
+                  ),
+                ),
+              );
             },
           ),
         ],

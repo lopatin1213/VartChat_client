@@ -51,30 +51,46 @@ class BackgroundSender {
         return;
       }
 
-      final completer = Completer<void>();
+      final authCompleter = Completer<void>();
+      final ackCompleter = Completer<void>();
       final errorCompleter = Completer<void>();
+
+      final clientMsgId = DateTime.now().microsecondsSinceEpoch;
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
 
       final sub = wsService.onMessage.listen(
             (data) {
           try {
             final parsed = Protocol.parsePacket(data);
-            if (parsed.type == Protocol.MSG_TYPE_SYSTEM) {
+            print("$parsed");
+            // 1. Ждем авторизацию
+            if (parsed.type == Protocol.MSG_TYPE_SYSTEM && !authCompleter.isCompleted) {
               final sysText = Protocol.readString(parsed.payload, 0);
               if (sysText.startsWith('Успех|')) {
                 debugPrint('>>> [BG SEND] 3. Получен "Успех". Авторизация подтверждена.');
                 wsService.markAuthenticated();
-                if (!completer.isCompleted) completer.complete();
+                authCompleter.complete();
+              }
+            }
+            // 2. Ждем подтверждение доставки (Ack) от сервера
+            else if (parsed.type == Protocol.MSG_TYPE_USER && authCompleter.isCompleted) {
+              print("0x01");
+              final userPacket = Protocol.parseUserPacket(parsed.payload);
+              print("Получен пакет $userPacket");
+              if (userPacket.clientMsgId == clientMsgId) {
+                debugPrint('>>> [BG SEND] 5. Получен ACK от сервера! Сообщение доставлено.');
+                if (!ackCompleter.isCompleted) ackCompleter.complete();
               }
             }
           } catch (_) {}
         },
         onDone: () {
-          if (!completer.isCompleted && !errorCompleter.isCompleted) {
-            errorCompleter.completeError('Соединение закрыто сервером до получения "Успех"');
+          if (!errorCompleter.isCompleted) {
+            errorCompleter.completeError('Соединение закрыто сервером');
           }
         },
         onError: (e) {
-          if (!completer.isCompleted && !errorCompleter.isCompleted) {
+          if (!errorCompleter.isCompleted) {
             errorCompleter.completeError('Ошибка сокета: $e');
           }
         },
@@ -83,13 +99,25 @@ class BackgroundSender {
       debugPrint('>>> [BG SEND] 4. Отправляем AUTH (isBackground)...');
       await wsService.sendToken(token, isBackground: true);
 
-      await Future.any([completer.future, errorCompleter.future]);
-      sub.cancel();
+      // Ждем успешной авторизации
+      await Future.any([authCompleter.future, errorCompleter.future]);
 
       debugPrint('>>> [BG SEND] 5. Отправляем сообщение...');
-      await wsService.sendEncryptedMessage(chatKey, text);
+      await wsService.sendEncryptedMessage(
+        chatKey,
+        text,
+        clientMsgId: clientMsgId,
+        timestamp: timestamp,
+      );
 
-      await Future.delayed(const Duration(milliseconds: 500));
+      // Ждем ACK от сервера (с защитой от зависания на 5 сек)
+      await Future.any([
+        ackCompleter.future,
+        errorCompleter.future,
+        Future.delayed(const Duration(seconds: 1000)).then((_) => throw TimeoutException('ACK timeout'))
+      ]);
+
+      sub.cancel();
       await wsService.disconnect();
       debugPrint('>>> [BG SEND] 6. УСПЕХ! Соединение закрыто.');
 

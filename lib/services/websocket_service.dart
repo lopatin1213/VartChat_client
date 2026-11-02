@@ -223,7 +223,7 @@ class WebSocketService {
     if (_channel == null || _sessionKey == null) throw Exception('Not ready');
     final sender = _currentUsername ?? '';
     if (sender.isEmpty) throw Exception('Username not set');
-
+    print("Вызван SendEcrypted");
     final plaintext = Uint8List.fromList(utf8.encode(text));
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
     final ts = timestamp ?? DateTime.now().millisecondsSinceEpoch;
@@ -299,10 +299,10 @@ class WebSocketService {
 
     try {
       await oldChannel?.sink.close(status.normalClosure).timeout(const Duration(seconds: 1));
-    } catch (_) {}
+    } catch (e) {print("Error: $e");}
     try {
       await oldController?.close();
-    } catch (_) {}
+    } catch (e) {print("Error: $e");}
   }
 
   Future<void> resetSession() async {

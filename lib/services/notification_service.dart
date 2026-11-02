@@ -66,10 +66,14 @@ class NotificationService {
       return;
     }
 
-    // Вычисляем kindInt для 0x07 (1=personal, 2=group, 3=channel)
     int kindInt = 1;
-    if (kind == 'group') kindInt = 2;
-    else if (kind == 'channel') kindInt = 3;
+    if (kind == 'group') {
+      kindInt = 2;
+    } else if (kind == 'channel') {
+      kindInt = 3;
+    } else if (kind == 'system') {
+      kindInt = 4;
+    }
 
     final String title = data['title'] ?? 'VartChat';
     final String body = data['body'] ?? '';
@@ -78,7 +82,7 @@ class NotificationService {
     String? chatKey = data['chatKey'];
     if (chatKey == null || chatKey.isEmpty) {
       if (kind == 'personal') {
-        chatKey = data['sender'];
+        chatKey = data['sender_username'] ?? data['sender'];
       } else if (kind == 'group' && data['group'] != null) {
         chatKey = '#${data['group']}';
       } else if (kind == 'channel' && data['channel'] != null) {
@@ -108,6 +112,36 @@ class NotificationService {
       }
     }
 
+    List<NotificationActionButton>? actions;
+    if (kind == 'system') {
+      actions = null;
+    } else if (kind == 'channel') {
+      actions = [
+        NotificationActionButton(
+          key: 'MARK_AS_READ',
+          label: 'Прочитано',
+          autoDismissible: true,
+          actionType: ActionType.SilentAction,
+        ),
+      ];
+    } else {
+      actions = [
+        NotificationActionButton(
+          key: 'REPLY',
+          label: 'Ответить',
+          requireInputText: true,
+          autoDismissible: true,
+          actionType: ActionType.SilentAction,
+        ),
+        NotificationActionButton(
+          key: 'MARK_AS_READ',
+          label: 'Прочитано',
+          autoDismissible: true,
+          actionType: ActionType.SilentAction,
+        ),
+      ];
+    }
+
     await AwesomeNotifications().createNotification(
       content: NotificationContent(
         id: msgId,
@@ -124,21 +158,7 @@ class NotificationService {
           'msgId': msgId.toString(),
         },
       ),
-      actionButtons: [
-        NotificationActionButton(
-          key: 'REPLY',
-          label: 'Ответить',
-          requireInputText: true,
-          autoDismissible: true,
-          actionType: ActionType.SilentAction,
-        ),
-        NotificationActionButton(
-          key: 'MARK_AS_READ',
-          label: 'Прочитано',
-          autoDismissible: true,
-          actionType: ActionType.SilentAction,
-        ),
-      ],
+      actionButtons: actions,
     );
   }
 
@@ -148,6 +168,7 @@ class NotificationService {
 
     final payload = receivedAction.payload;
     final String? chatKey = payload?['chatKey'];
+    print("$chatKey");
     final String? kindStr = payload?['kind'];
     final String? msgIdStr = payload?['msgId'];
 
@@ -158,7 +179,7 @@ class NotificationService {
       final text = receivedAction.buttonKeyInput;
       if (text.isNotEmpty && chatKey != null && chatKey.isNotEmpty) {
         debugPrint('>>> [ACTION] Перехвачен "Ответить". Передаем в BackgroundSender.');
-        await AwesomeNotifications().cancelAll();
+
         await BackgroundSender.sendReply(chatKey, text, msgId);
       }
     } else if (receivedAction.buttonKeyPressed == 'MARK_AS_READ') {
@@ -168,5 +189,6 @@ class NotificationService {
         await BackgroundSender.markAsRead(chatKey, kind, msgId);
       }
     }
+    await AwesomeNotifications().cancel(msgId);
   }
 }

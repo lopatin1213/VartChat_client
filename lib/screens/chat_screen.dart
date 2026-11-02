@@ -7,6 +7,8 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
+import 'settings_screen.dart';
+import 'user_profile_screen.dart';
 
 typedef ChatMsg = ({
   int id,
@@ -1775,9 +1777,22 @@ class ChatScreenState extends State<ChatScreen> {
 
     final presenceWidget = _buildPresenceWidget();
 
-    return AppBar(
-      titleSpacing: 0,
-      title: Row(
+    // Тап по шапке открывает профиль (только для личных чатов)
+    final titleWidget = GestureDetector(
+      onTap: (!isGroup && !isChannel && !isSystem)
+          ? () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => UserProfileScreen(
+              wsService: widget.wsService,
+              username: widget.chatName,
+            ),
+          ),
+        );
+      }
+          : null,
+      child: Row(
         children: [
           Icon(leadingIcon, color: Colors.white, size: 24),
           const SizedBox(width: 8),
@@ -1797,11 +1812,16 @@ class ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
+    );
+
+    return AppBar(
+      titleSpacing: 0,
+      title: titleWidget,
       leading: widget.onBack != null
           ? IconButton(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: widget.onBack,
-            )
+        icon: const Icon(Icons.arrow_back),
+        onPressed: widget.onBack,
+      )
           : null,
     );
   }

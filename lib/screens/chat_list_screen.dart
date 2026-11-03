@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:share_plus/share_plus.dart'; // Для кнопки приглашения
+import 'package:share_plus/share_plus.dart';
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
 import '../services/crypto_service.dart';
@@ -14,7 +14,6 @@ import '../models/message.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
 import 'settings_screen.dart';
-import 'user_profile_screen.dart';
 
 enum ViewMode { chats, contacts, groups, channels }
 
@@ -201,7 +200,6 @@ class _ChatListScreenState extends State<ChatListScreen>
     _subscribeToMessages();
     _refreshChats();
 
-    // Проверяем отложенный ответ при старте
     _checkPendingReply();
 
     _periodicTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
@@ -221,7 +219,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     final pending = await StorageService.getPendingReply();
     if (pending != null && pending['chatKey'] != null && pending['text'] != null) {
       print(">>> [UI] Найден отложенный ответ, отправляем: ${pending['text']}");
-          _sendMessage(pending['chatKey']!, pending['text']!);
+      _sendMessage(pending['chatKey']!, pending['text']!);
     }
   }
 
@@ -270,7 +268,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       _performReconnect();
     }
 
-    _checkPendingReply(); // <--- ПРОВЕРЯЕМ ПРИ ВОЗВРАЩЕНИИ
+    _checkPendingReply();
   }
 
   Future<void> _loadServerAddress() async {
@@ -555,7 +553,6 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   void _refreshChats() {
     try {
-      // Теперь запрашиваем только тех, с кем есть история
       widget.wsService.sendCommand('/listusers history');
       widget.wsService.sendCommand('/listgroups');
       widget.wsService.sendCommand('/channels');
@@ -567,7 +564,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   void _scheduleReconnect() {
     if (!mounted ||
-        _wasInBackground || // <--- ДОБАВИТЬ ВОТ ЭТУ ПРОВЕРКУ
+        _wasInBackground ||
         _reconnectTimer != null ||
         _isConnecting ||
         _reconnectInProgress)
@@ -611,7 +608,6 @@ class _ChatListScreenState extends State<ChatListScreen>
 
       final token = await StorageService.getToken();
       if (token != null) {
-        print("[Chat List UI]: Отправляем токен");
         await widget.wsService.sendToken(token, fcmToken: FcmService.token);
       } else {
         _logout();
@@ -623,8 +619,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       if (mounted) setState(() => _isConnecting = false);
 
       _flushOutbox();
-
-      // ВОТ ТУТ ИСПРАВЛЕНИЕ:
       _checkPendingReply();
 
       if (_selectedChat != null) {
@@ -670,10 +664,9 @@ class _ChatListScreenState extends State<ChatListScreen>
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
 
-        // --- ОБРАБОТКА УСПЕШНОЙ АВТОРИЗАЦИИ ---
         if (text.startsWith('Успех|')) {
           print('>>> [UI] Получен Успех при реконнекте');
-          widget.wsService.markAuthenticated(); // Разблокируем очередь
+          widget.wsService.markAuthenticated();
 
           if (mounted) {
             setState(() {
@@ -681,12 +674,11 @@ class _ChatListScreenState extends State<ChatListScreen>
             });
           }
 
-          _flushOutbox(); // Отправляем то, что застряло в очереди
-          _checkPendingReply(); // Проверяем, нет ли ответа из уведомления
+          _flushOutbox();
+          _checkPendingReply();
 
           return;
         }
-        // ----------------------------------------
 
         if (text.contains('Вы заблокированы')) {
           _logout();
@@ -836,14 +828,6 @@ class _ChatListScreenState extends State<ChatListScreen>
                 ..addAll(newLastSeen);
             });
           }
-          // ЛОВУШКА ДЛЯ НЕИЗВЕСТНЫХ СИСТЕМНЫХ КОМАНД
-          // Если мы дошли до сюда, значит ни один из if выше не сработал.
-          // Показываем текст пользователю, чтобы он видел ответ сервера.
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(text)),
-            );
-          }
           if (_isConnecting && mounted) setState(() => _isConnecting = false);
           return;
         }
@@ -932,6 +916,22 @@ class _ChatListScreenState extends State<ChatListScreen>
           if (_isConnecting && mounted) setState(() => _isConnecting = false);
           return;
         }
+        if (text.startsWith('[Система] Профиль|') ||
+            text.startsWith('[Система] Сессии:') ||
+            text.startsWith('[Система] Пароль успешно изменен') ||
+            text.startsWith('[Система] Настройки приватности обновлены') ||
+            text.startsWith('[Система] Профиль успешно обновлен') ||
+            text.startsWith('[Система] Устройство успешно отключено'
+            )) {
+          return;
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(text)),
+          );
+        }
+
       } else if (type == Protocol.MSG_TYPE_READ) {
         _handleReadIncoming(payload);
         return;
@@ -1762,6 +1762,9 @@ class _ChatListScreenState extends State<ChatListScreen>
   void _openChat(String chatKey) {
     if (_selectedChat == chatKey) return;
     if (_selectedChat != null) _disposeScrollController(_selectedChat!);
+
+    FcmService.activeChatKey = chatKey;
+
     setState(() {
       _selectedChat = chatKey;
       _lastRenderedChat = chatKey;
@@ -1782,6 +1785,9 @@ class _ChatListScreenState extends State<ChatListScreen>
   void _closeChat() {
     if (_selectedChat == null) return;
     final chatKey = _selectedChat!;
+
+    FcmService.activeChatKey = null;
+
     setState(() {
       _chatOpen = false;
       _selectedChat = null;
@@ -1926,6 +1932,22 @@ class _ChatListScreenState extends State<ChatListScreen>
           ),
           const Divider(),
           ListTile(
+            leading: const Icon(Icons.settings),
+            title: const Text('Настройки'),
+            onTap: () {
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => SettingsScreen(
+                    wsService: widget.wsService,
+                    username: widget.username,
+                  ),
+                ),
+              );
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.logout),
             title: const Text('Выйти'),
             onTap: () {
@@ -1942,22 +1964,6 @@ class _ChatListScreenState extends State<ChatListScreen>
             onTap: () {
               Navigator.pop(context);
               _showDeleteAccountDialog();
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.settings),
-            title: const Text('Настройки'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => SettingsScreen(
-                    wsService: widget.wsService,
-                    username: widget.username,
-                  ),
-                ),
-              );
             },
           ),
         ],

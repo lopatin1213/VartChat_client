@@ -7,7 +7,6 @@ import '../firebase_options.dart';
 import 'notification_service.dart';
 
 // Фоновый обработчик (обязателен для data-only пушей)
-
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   print('>>> [BG] Фоновый обработчик запущен!');
@@ -26,11 +25,16 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   }
 }
 
-
 class FcmService {
   static String? _token;
   static StreamSubscription<String>? _refreshSub;
+
+  // Нотификатор для открытия чата по клику на пуш
   static final ValueNotifier<String?> openChatNotifier = ValueNotifier<String?>(null);
+
+  // ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ: Хранит ключ текущего открытого чата.
+  // Нужна для того, чтобы не показывать уведомление, если мы уже в этом чате.
+  static String? activeChatKey;
 
   static Future<void> init() async {
     try {
@@ -52,7 +56,23 @@ class FcmService {
 
         // Передний план
         FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-          NotificationService.showNotification(message.data);
+          // Собираем данные из пуша (поддерживаем и data-only, и обычные пуши Firebase)
+          final Map<String, dynamic> mergedData = Map.from(message.data);
+
+          if (message.notification != null) {
+            mergedData['title'] = message.notification!.title ?? '';
+            mergedData['body'] = message.notification!.body ?? '';
+          }
+
+          final chatKey = mergedData['chatKey'];
+
+          // ПРОВЕРКА: Если мы уже в этом чате - не показываем уведомление
+          if (activeChatKey != null && activeChatKey == chatKey) {
+            debugPrint('>>> [FCM] Пуш для открытого чата ($chatKey) проигнорирован.');
+            return;
+          }
+
+          NotificationService.showNotification(mergedData);
         });
 
         // Клик по пушу (приложение в фоне)
@@ -73,5 +93,6 @@ class FcmService {
   static void dispose() {
     _refreshSub?.cancel();
     _refreshSub = null;
+    openChatNotifier.dispose();
   }
 }

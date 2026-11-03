@@ -7,21 +7,20 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
-import 'settings_screen.dart';
 import 'user_profile_screen.dart';
 
 typedef ChatMsg = ({
-  int id,
-  int clientMsgId,
-  String sender,
-  String text,
-  bool isMe,
-  int timestamp,
-  int replyToId,
-  bool readMe,
-  bool readAny,
-  int? views,
-  bool edited,
+int id,
+int clientMsgId,
+String sender,
+String text,
+bool isMe,
+int timestamp,
+int replyToId,
+bool readMe,
+bool readAny,
+int? views,
+bool edited,
 });
 
 typedef ReplyPreview = ({String sender, String text, bool isMe});
@@ -55,7 +54,7 @@ class ChatScreen extends StatefulWidget {
   final void Function(int msgId)? onSetReply;
   final VoidCallback? onCancelReply;
   final ReplyPreview? Function(int replyToId)? resolveReply;
-  final List<String> typingUsers; // <--- НОВОЕ ПОЛЕ
+  final List<String> typingUsers;
 
   const ChatScreen({
     super.key,
@@ -109,7 +108,7 @@ class ChatScreenState extends State<ChatScreen> {
   int _lastMessagesLength = 0;
 
   static final ValueNotifier<bool> _intrinsicWidthDisabled =
-      ValueNotifier<bool>(false);
+  ValueNotifier<bool>(false);
   static bool _errorHandlerInstalled = false;
 
   static void _installErrorHandler() {
@@ -120,7 +119,7 @@ class ChatScreenState extends State<ChatScreen> {
       final text = details.exceptionAsString();
       final isDryBaselineBug =
           text.contains('does not implement "computeDryBaseline"') ||
-          (text.contains('computeDryBaseline') && text.contains('RenderLine'));
+              (text.contains('computeDryBaseline') && text.contains('RenderLine'));
       if (isDryBaselineBug && !_intrinsicWidthDisabled.value) {
         debugPrint(
           '[WORKAROUND] computeDryBaseline bug detected — IntrinsicWidth in message bubbles disabled for this session.',
@@ -197,7 +196,7 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   void _onTextChanged() {
-    if (_editingMsgId != null) return; // <--- ДОБАВИТЬ
+    if (_editingMsgId != null) return;
     if (widget.controller.text.trim().isEmpty) return;
 
     final now = DateTime.now();
@@ -207,13 +206,13 @@ class ChatScreenState extends State<ChatScreen> {
     final kind = widget.chatName.startsWith('#')
         ? Protocol.MSG_KIND_GROUP
         : (widget.chatName.startsWith('&')
-              ? Protocol.MSG_KIND_CHANNEL
-              : Protocol.MSG_KIND_PERSONAL);
+        ? Protocol.MSG_KIND_CHANNEL
+        : Protocol.MSG_KIND_PERSONAL);
 
     if (kind != Protocol.MSG_KIND_CHANNEL) {
       print(
         '[TYPING] Отправляю пакет: $kind -> ${widget.chatName}',
-      ); // <--- ДОБАВИТЬ
+      );
       widget.wsService.sendTyping(kind, widget.chatName);
     }
   }
@@ -278,16 +277,14 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   Widget? _buildPresenceWidget() {
-    // 1. Если кто-то печатает
     if (widget.typingUsers.isNotEmpty) {
       String text;
-      // Если это личный чат (titleOverride != null), имя не пишем
       if (widget.titleOverride != null) {
         text = 'печатает';
       } else if (widget.typingUsers.length == 1) {
         final name =
             widget.resolveDisplayName?.call(widget.typingUsers.first) ??
-            widget.typingUsers.first;
+                widget.typingUsers.first;
         text = '$name печатает';
       } else {
         text = '${widget.typingUsers.length} человека печатают';
@@ -296,15 +293,13 @@ class ChatScreenState extends State<ChatScreen> {
       return TypingIndicator(
         text: text,
         style: TextStyle(
-          // <--- Убрали const
           fontSize: 14,
           fontWeight: FontWeight.w600,
-          color: Theme.of(context).colorScheme.primary, // <--- Цвет темы
+          color: Theme.of(context).colorScheme.primary,
         ),
       );
     }
 
-    // 2. Если никто не печатает, показываем обычный статус (в сети, был(а)...)
     if (widget.titleOverride == null) return null;
     if (widget.isOnline) {
       return Text(
@@ -359,8 +354,8 @@ class ChatScreenState extends State<ChatScreen> {
   String _autoLink(String text) {
     final codeParts = <String>[];
     var result = text.replaceAllMapped(RegExp(r'```[\s\S]*?```|`[^`\n]+`'), (
-      m,
-    ) {
+        m,
+        ) {
       codeParts.add(m.group(0)!);
       return '\x00${codeParts.length - 1}\x00';
     });
@@ -371,17 +366,15 @@ class ChatScreenState extends State<ChatScreen> {
       return '\x01${linkParts.length - 1}\x01';
     });
 
-    // --- ДОБАВЛЕНО: Извлекаем и защищаем e-mail ---
     final emailParts = <String>[];
     result = result.replaceAllMapped(
       RegExp(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
-      (m) {
+          (m) {
         final email = m.group(0)!;
         emailParts.add('[$email](mailto:$email)');
         return '\x02${emailParts.length - 1}\x02';
       },
     );
-    // ----------------------------------------------
 
     final urlRegex = RegExp(
       r'https?://[^\s<>()]+'
@@ -408,11 +401,9 @@ class ChatScreenState extends State<ChatScreen> {
       result = result.replaceAll('\x01$i\x01', linkParts[i]);
     }
 
-    // --- ДОБАВЛЕНО: Восстанавливаем e-mail ---
     for (var i = 0; i < emailParts.length; i++) {
       result = result.replaceAll('\x02$i\x02', emailParts[i]);
     }
-    // ----------------------------------------
 
     for (var i = 0; i < codeParts.length; i++) {
       result = result.replaceAll('\x00$i\x00', codeParts[i]);
@@ -421,10 +412,10 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   void _wrapSelection(
-    String prefix,
-    String suffix, {
-    String placeholder = 'текст',
-  }) {
+      String prefix,
+      String suffix, {
+        String placeholder = 'текст',
+      }) {
     final text = widget.controller.text;
     final sel = widget.controller.selection;
     if (!sel.isValid) {
@@ -555,38 +546,38 @@ class ChatScreenState extends State<ChatScreen> {
             _toolbarButton(
               Icons.format_bold,
               'Жирный',
-              () => _wrapSelection('**', '**', placeholder: 'жирный'),
+                  () => _wrapSelection('**', '**', placeholder: 'жирный'),
             ),
             _toolbarButton(
               Icons.format_italic,
               'Курсив',
-              () => _wrapSelection('*', '*', placeholder: 'курсив'),
+                  () => _wrapSelection('*', '*', placeholder: 'курсив'),
             ),
             _toolbarButton(
               Icons.code,
               'Инлайн-код',
-              () => _wrapSelection('`', '`', placeholder: 'код'),
+                  () => _wrapSelection('`', '`', placeholder: 'код'),
             ),
             _toolbarButton(
               Icons.data_object,
               'Блок кода',
-              () => _insertBlock('```'),
+                  () => _insertBlock('```'),
             ),
             _toolbarButton(Icons.link, 'Ссылка', _insertLink),
             _toolbarButton(
               Icons.format_quote,
               'Цитата',
-              () => _insertLinePrefix('> '),
+                  () => _insertLinePrefix('> '),
             ),
             _toolbarButton(
               Icons.format_list_bulleted,
               'Список',
-              () => _insertLinePrefix('- '),
+                  () => _insertLinePrefix('- '),
             ),
             _toolbarButton(
               Icons.format_list_numbered,
               'Нумерованный список',
-              () => _insertLinePrefix('1. '),
+                  () => _insertLinePrefix('1. '),
             ),
           ],
         ),
@@ -786,11 +777,11 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _showContextMenu(
-    int msgId,
-    String text,
-    bool isMe,
-    RelativeRect position,
-  ) async {
+      int msgId,
+      String text,
+      bool isMe,
+      RelativeRect position,
+      ) async {
     final items = <PopupMenuEntry<String>>[
       const PopupMenuItem<String>(
         value: 'reply',
@@ -943,8 +934,8 @@ class ChatScreenState extends State<ChatScreen> {
     final kind = widget.chatName.startsWith('#')
         ? Protocol.MSG_KIND_GROUP
         : (widget.chatName.startsWith('&')
-              ? Protocol.MSG_KIND_CHANNEL
-              : Protocol.MSG_KIND_PERSONAL);
+        ? Protocol.MSG_KIND_CHANNEL
+        : Protocol.MSG_KIND_PERSONAL);
 
     widget.wsService.sendCommand('/report $kind $msgId $reason');
 
@@ -1096,10 +1087,10 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildReplyQuoteInBubble(
-    ReplyPreview quote,
-    bool isMe,
-    Color textColor,
-  ) {
+      ReplyPreview quote,
+      bool isMe,
+      Color textColor,
+      ) {
     final accent = isMe
         ? Colors.green[800]!
         : Theme.of(context).colorScheme.primary;
@@ -1175,7 +1166,7 @@ class ChatScreenState extends State<ChatScreen> {
 
     var cleanText = quote.text.replaceAllMapped(
       RegExp(r'\[([^\]]+)\]\([^)]+\)'),
-      (m) => m.group(1)!,
+          (m) => m.group(1)!,
     );
 
     return Padding(
@@ -1260,20 +1251,20 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildMessageBubble(
-    int msgId,
-    int clientMsgId,
-    String sender,
-    String text,
-    bool isMe,
-    int timestamp,
-    int replyToId,
-    bool readMe,
-    bool readAny,
-    int? views,
-    bool edited,
-    bool isGroupOrChannel,
-    double maxWidth,
-  ) {
+      int msgId,
+      int clientMsgId,
+      String sender,
+      String text,
+      bool isMe,
+      int timestamp,
+      int replyToId,
+      bool readMe,
+      bool readAny,
+      int? views,
+      bool edited,
+      bool isGroupOrChannel,
+      double maxWidth,
+      ) {
     final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
     final backgroundColor = isMe
         ? Colors.green[100]
@@ -1391,17 +1382,17 @@ class ChatScreenState extends State<ChatScreen> {
                 ],
                 const SizedBox(width: 4),
                 _buildStatusIcons((
-                  id: msgId,
-                  clientMsgId: clientMsgId,
-                  sender: sender,
-                  text: text,
-                  isMe: isMe,
-                  timestamp: timestamp,
-                  replyToId: replyToId,
-                  readMe: readMe,
-                  readAny: readAny,
-                  views: views,
-                  edited: edited,
+                id: msgId,
+                clientMsgId: clientMsgId,
+                sender: sender,
+                text: text,
+                isMe: isMe,
+                timestamp: timestamp,
+                replyToId: replyToId,
+                readMe: readMe,
+                readAny: readAny,
+                views: views,
+                edited: edited,
                 ), textColor),
               ],
             ),
@@ -1777,7 +1768,6 @@ class ChatScreenState extends State<ChatScreen> {
 
     final presenceWidget = _buildPresenceWidget();
 
-    // Тап по шапке открывает профиль (только для личных чатов)
     final titleWidget = GestureDetector(
       onTap: (!isGroup && !isChannel && !isSystem)
           ? () {
@@ -1787,6 +1777,7 @@ class ChatScreenState extends State<ChatScreen> {
             builder: (_) => UserProfileScreen(
               wsService: widget.wsService,
               username: widget.chatName,
+              myUsername: widget.username,
             ),
           ),
         );
@@ -1930,7 +1921,7 @@ class ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     print(
       '[TYPING UI] build ChatScreen, typingUsers = ${widget.typingUsers}',
-    ); // <--- ДОБАВИТЬ
+    );
     final msgs = widget.messages;
     final isGroupOrChannel =
         widget.chatName.startsWith('#') || widget.chatName.startsWith('&');
@@ -1978,8 +1969,8 @@ class ChatScreenState extends State<ChatScreen> {
         : _buildSelectionAppBar();
     final canPop =
         _selectedIds.isEmpty &&
-        _mdDisabledForId == null &&
-        _editingMsgId == null;
+            _mdDisabledForId == null &&
+            _editingMsgId == null;
 
     return PopScope(
       canPop: canPop,
@@ -2008,7 +1999,7 @@ class ChatScreenState extends State<ChatScreen> {
                     reverse: true,
                     itemCount: items.length,
                     itemBuilder: (context, index) =>
-                        items[items.length - 1 - index],
+                    items[items.length - 1 - index],
                   ),
                   if (!_isAtBottom && msgs.isNotEmpty)
                     Positioned(
@@ -2039,7 +2030,7 @@ class ChatScreenState extends State<ChatScreen> {
 
     widget.onSendMessage(text);
     widget.controller.clear();
-    _scrollToTop(); // Исправлено название
+    _scrollToTop();
   }
 
   void _scrollToTop() {
@@ -2059,7 +2050,7 @@ class ChatScreenState extends State<ChatScreen> {
     if (href.startsWith('killsession:')) {
       final token = href.substring('killsession:'.length);
       try {
-        await widget.wsService.sendLogout(token, type: 2); // 2 = KILL_SESSION
+        await widget.wsService.sendLogout(token, type: 2);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Запрос на отключение устройства отправлен')),

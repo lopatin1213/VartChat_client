@@ -54,7 +54,7 @@ class CryptoService {
 
     // Используем встроенный метод concatenation для объединения nonce + ciphertext + mac
     final combined = secretBox.concatenation();
-    print(combined);
+    //print(combined);
     // Извлекаем байты nonce для возврата (используем свойство nonce из SecretBox)
     final nonceBytes = Uint8List.fromList(secretBox.nonce);
 

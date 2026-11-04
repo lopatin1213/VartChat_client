@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:share_plus/share_plus.dart'; // Для кнопки приглашения
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
 import '../services/crypto_service.dart';
@@ -13,8 +13,7 @@ import '../services/fcm_service.dart';
 import '../models/message.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
-import 'settings_screen.dart';
-import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+
 
 enum ViewMode { chats, contacts, groups, channels }
 
@@ -59,7 +58,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   String? _selectedChat;
   String? _lastRenderedChat;
   bool _chatOpen = false;
-  StreamSubscription? _sharingSub;
 
   StreamSubscription? _subscription;
   Timer? _reconnectTimer;
@@ -195,7 +193,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   @override
   void initState() {
     super.initState();
-    print('>>> [CHAT_LIST] initState вызван');
     WidgetsBinding.instance.addObserver(this);
 
     _loadServerAddress();
@@ -203,6 +200,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     _subscribeToMessages();
     _refreshChats();
 
+    // Проверяем отложенный ответ при старте
     _checkPendingReply();
 
     _periodicTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
@@ -216,14 +214,13 @@ class _ChatListScreenState extends State<ChatListScreen>
         setState(() => _isConnecting = false);
       }
     });
-    _initSharingListener();
   }
 
   Future<void> _checkPendingReply() async {
     final pending = await StorageService.getPendingReply();
     if (pending != null && pending['chatKey'] != null && pending['text'] != null) {
       print(">>> [UI] Найден отложенный ответ, отправляем: ${pending['text']}");
-      _sendMessage(pending['chatKey']!, pending['text']!);
+          _sendMessage(pending['chatKey']!, pending['text']!);
     }
   }
 
@@ -245,7 +242,6 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
     _chatFocusNode.dispose();
     _subscription?.cancel();
-    _sharingSub?.cancel();
     super.dispose();
   }
 
@@ -273,7 +269,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       _performReconnect();
     }
 
-    _checkPendingReply();
+    _checkPendingReply(); // <--- ПРОВЕРЯЕМ ПРИ ВОЗВРАЩЕНИИ
   }
 
   Future<void> _loadServerAddress() async {
@@ -558,7 +554,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   void _refreshChats() {
     try {
-      widget.wsService.sendCommand('/listusers history');
+      widget.wsService.sendCommand('/listusers');
       widget.wsService.sendCommand('/listgroups');
       widget.wsService.sendCommand('/channels');
       widget.wsService.sendCommand('/onlineusers');
@@ -569,7 +565,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   void _scheduleReconnect() {
     if (!mounted ||
-        _wasInBackground ||
+        _wasInBackground || // <--- ДОБАВИТЬ ВОТ ЭТУ ПРОВЕРКУ
         _reconnectTimer != null ||
         _isConnecting ||
         _reconnectInProgress)
@@ -624,6 +620,8 @@ class _ChatListScreenState extends State<ChatListScreen>
       if (mounted) setState(() => _isConnecting = false);
 
       _flushOutbox();
+
+      // ВОТ ТУТ ИСПРАВЛЕНИЕ:
       _checkPendingReply();
 
       if (_selectedChat != null) {
@@ -669,22 +667,11 @@ class _ChatListScreenState extends State<ChatListScreen>
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
 
+// --- ОБРАБОТКА УСПЕШНОЙ АВТОРИЗАЦИИ ---
         if (text.startsWith('Успех|')) {
           print('>>> [UI] Получен Успех при реконнекте');
           widget.wsService.markAuthenticated();
-
-          if (mounted) {
-            setState(() {
-              _isConnecting = false;
-            });
-          }
-
-          _flushOutbox();
-          _checkPendingReply();
-
-          return;
         }
-
         if (text.contains('Вы заблокированы')) {
           _logout();
           if (mounted) {
@@ -921,22 +908,6 @@ class _ChatListScreenState extends State<ChatListScreen>
           if (_isConnecting && mounted) setState(() => _isConnecting = false);
           return;
         }
-        if (text.startsWith('[Система] Профиль|') ||
-            text.startsWith('[Система] Сессии:') ||
-            text.startsWith('[Система] Пароль успешно изменен') ||
-            text.startsWith('[Система] Настройки приватности обновлены') ||
-            text.startsWith('[Система] Профиль успешно обновлен') ||
-            text.startsWith('[Система] Устройство успешно отключено'
-            )) {
-          return;
-        }
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(text)),
-          );
-        }
-
       } else if (type == Protocol.MSG_TYPE_READ) {
         _handleReadIncoming(payload);
         return;
@@ -1559,87 +1530,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       ],
     );
   }
-  void _initSharingListener() async {
-    // 1. Обработка шаринга, когда приложение было закрыто
-    final initialText = await ReceiveSharingIntent.instance.getInitialMedia();
-    if (initialText.isNotEmpty) {
-      final text = initialText.map((m) => m.path ?? '').join('\n');
-      _handleSharedText(text);
-      ReceiveSharingIntent.instance.reset();
-    }
-
-    // 2. Обработка шаринга, когда приложение уже открыто
-    _sharingSub = ReceiveSharingIntent.instance.getMediaStream().listen(
-          (List<SharedMediaFile> value) {
-        if (value.isNotEmpty) {
-          final text = value.map((m) => m.path ?? '').join('\n');
-          _handleSharedText(text);
-        }
-      },
-      onError: (err) {
-        print('[SHARE] Ошибка: $err');
-      },
-    );
-  }
-
-  void _handleSharedText(String text) {
-    try {
-      print("Вызван");
-      if (text.isEmpty || !mounted) return;
-
-      // Показываем нижний лист с выбором чата
-      showModalBottomSheet(
-        context: context,
-        builder: (ctx) =>
-            SafeArea(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.all(16.0),
-                    child: Text(
-                      'Отправить в...',
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                  Expanded(
-                    child: ListView(
-                      children: _messages.keys.map((chatKey) {
-                        final isGroup = chatKey.startsWith('#');
-                        final isChannel = chatKey.startsWith('&');
-                        final displayName = isGroup || isChannel
-                            ? chatKey.substring(1)
-                            : _displayNameFor(chatKey);
-
-                        return ListTile(
-                          leading: Icon(
-                            isGroup ? Icons.group : (isChannel
-                                ? Icons.campaign
-                                : Icons.person),
-                          ),
-                          title: Text(displayName),
-                          onTap: () {
-                            Navigator.pop(ctx);
-                            _sendMessage(chatKey, text);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                  content: Text('Отправлено в $displayName')),
-                            );
-                          },
-                        );
-                      }).toList(),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-      );
-    }catch (e){
-      print(e);
-    }
-
-  }
 
   Widget _buildCurrentList() {
     switch (_currentView) {
@@ -1848,9 +1738,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   void _openChat(String chatKey) {
     if (_selectedChat == chatKey) return;
     if (_selectedChat != null) _disposeScrollController(_selectedChat!);
-
-    FcmService.activeChatKey = chatKey;
-
     setState(() {
       _selectedChat = chatKey;
       _lastRenderedChat = chatKey;
@@ -1871,9 +1758,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   void _closeChat() {
     if (_selectedChat == null) return;
     final chatKey = _selectedChat!;
-
-    FcmService.activeChatKey = null;
-
     setState(() {
       _chatOpen = false;
       _selectedChat = null;
@@ -2017,22 +1901,6 @@ class _ChatListScreenState extends State<ChatListScreen>
             },
           ),
           const Divider(),
-          ListTile(
-            leading: const Icon(Icons.settings),
-            title: const Text('Настройки'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => SettingsScreen(
-                    wsService: widget.wsService,
-                    username: widget.username,
-                  ),
-                ),
-              );
-            },
-          ),
           ListTile(
             leading: const Icon(Icons.logout),
             title: const Text('Выйти'),

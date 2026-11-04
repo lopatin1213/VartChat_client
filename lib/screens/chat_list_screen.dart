@@ -667,6 +667,11 @@ class _ChatListScreenState extends State<ChatListScreen>
       if (type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(payload, 0);
 
+// --- ОБРАБОТКА УСПЕШНОЙ АВТОРИЗАЦИИ ---
+        if (text.startsWith('Успех|')) {
+          print('>>> [UI] Получен Успех при реконнекте');
+          widget.wsService.markAuthenticated();
+        }
         if (text.contains('Вы заблокированы')) {
           _logout();
           if (mounted) {

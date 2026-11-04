@@ -671,6 +671,17 @@ class _ChatListScreenState extends State<ChatListScreen>
         if (text.startsWith('Успех|')) {
           print('>>> [UI] Получен Успех при реконнекте');
           widget.wsService.markAuthenticated();
+          if (mounted) {
+            setState(() {
+              _isConnecting = false;
+            });
+          }
+
+          _flushOutbox(); // Отправляем то, что застряло в очереди
+          _checkPendingReply(); // Проверяем, нет ли ответа из уведомления
+
+          return;
+
         }
         if (text.contains('Вы заблокированы')) {
           _logout();

@@ -14,6 +14,7 @@ import '../models/message.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
 import 'settings_screen.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 
 enum ViewMode { chats, contacts, groups, channels }
 
@@ -58,6 +59,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   String? _selectedChat;
   String? _lastRenderedChat;
   bool _chatOpen = false;
+  StreamSubscription? _sharingSub;
 
   StreamSubscription? _subscription;
   Timer? _reconnectTimer;
@@ -193,6 +195,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   @override
   void initState() {
     super.initState();
+    print('>>> [CHAT_LIST] initState вызван');
     WidgetsBinding.instance.addObserver(this);
 
     _loadServerAddress();
@@ -213,6 +216,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         setState(() => _isConnecting = false);
       }
     });
+    _initSharingListener();
   }
 
   Future<void> _checkPendingReply() async {
@@ -241,6 +245,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
     _chatFocusNode.dispose();
     _subscription?.cancel();
+    _sharingSub?.cancel();
     super.dispose();
   }
 
@@ -1553,6 +1558,87 @@ class _ChatListScreenState extends State<ChatListScreen>
           ),
       ],
     );
+  }
+  void _initSharingListener() async {
+    // 1. Обработка шаринга, когда приложение было закрыто
+    final initialText = await ReceiveSharingIntent.instance.getInitialMedia();
+    if (initialText.isNotEmpty) {
+      final text = initialText.map((m) => m.path ?? '').join('\n');
+      _handleSharedText(text);
+      ReceiveSharingIntent.instance.reset();
+    }
+
+    // 2. Обработка шаринга, когда приложение уже открыто
+    _sharingSub = ReceiveSharingIntent.instance.getMediaStream().listen(
+          (List<SharedMediaFile> value) {
+        if (value.isNotEmpty) {
+          final text = value.map((m) => m.path ?? '').join('\n');
+          _handleSharedText(text);
+        }
+      },
+      onError: (err) {
+        print('[SHARE] Ошибка: $err');
+      },
+    );
+  }
+
+  void _handleSharedText(String text) {
+    try {
+      print("Вызван");
+      if (text.isEmpty || !mounted) return;
+
+      // Показываем нижний лист с выбором чата
+      showModalBottomSheet(
+        context: context,
+        builder: (ctx) =>
+            SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: Text(
+                      'Отправить в...',
+                      style: TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView(
+                      children: _messages.keys.map((chatKey) {
+                        final isGroup = chatKey.startsWith('#');
+                        final isChannel = chatKey.startsWith('&');
+                        final displayName = isGroup || isChannel
+                            ? chatKey.substring(1)
+                            : _displayNameFor(chatKey);
+
+                        return ListTile(
+                          leading: Icon(
+                            isGroup ? Icons.group : (isChannel
+                                ? Icons.campaign
+                                : Icons.person),
+                          ),
+                          title: Text(displayName),
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _sendMessage(chatKey, text);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                  content: Text('Отправлено в $displayName')),
+                            );
+                          },
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+      );
+    }catch (e){
+      print(e);
+    }
+
   }
 
   Widget _buildCurrentList() {

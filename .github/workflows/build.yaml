@@ -1,0 +1,42 @@
+name: Build Linux Desktop
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Linux dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        channel: 'stable'
+        cache: true
+
+    - name: Get dependencies
+      run: flutter pub get
+
+    - name: Build Linux
+      run: flutter build linux --release
+
+    - name: Package build
+      run: |
+        cd build/linux/x64/release/bundle
+        tar -czvf ../../../../../vartchat-linux-x64.tar.gz .
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: vartchat-linux
+        path: vartchat-linux-x64.tar.gz

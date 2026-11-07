@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
-import '../services/websocket_service.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../services/websocket_service.dart';
 import 'user_profile_screen.dart';
 import 'privacy_settings_screen.dart';
 import 'sessions_screen.dart';
 import 'change_password_screen.dart';
 
-class SettingsScreen extends StatelessWidget {
+class SettingsScreen extends StatefulWidget {
   final WebSocketService wsService;
   final String username;
 
@@ -17,6 +18,36 @@ class SettingsScreen extends StatelessWidget {
   });
 
   @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  String _appVersion = 'загрузка...';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadVersion();
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(() {
+          _appVersion = '${info.version} (${info.buildNumber})';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _appVersion = 'неизвестно';
+        });
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Настройки')),
@@ -25,16 +56,16 @@ class SettingsScreen extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.person),
             title: const Text('Аккаунт'),
-            subtitle: Text(username),
+            subtitle: Text(widget.username),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               Navigator.push(
                 context,
                 MaterialPageRoute(
                   builder: (_) => UserProfileScreen(
-                    wsService: wsService,
-                    username: username,
-                    myUsername: username,
+                    wsService: widget.wsService,
+                    username: widget.username,
+                    myUsername: widget.username,
                   ),
                 ),
               );
@@ -48,7 +79,7 @@ class SettingsScreen extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => PrivacySettingsScreen(wsService: wsService),
+                  builder: (_) => PrivacySettingsScreen(wsService: widget.wsService),
                 ),
               );
             },
@@ -62,7 +93,7 @@ class SettingsScreen extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => SessionsScreen(wsService: wsService),
+                  builder: (_) => SessionsScreen(wsService: widget.wsService),
                 ),
               );
             },
@@ -75,7 +106,7 @@ class SettingsScreen extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => ChangePasswordScreen(wsService: wsService),
+                  builder: (_) => ChangePasswordScreen(wsService: widget.wsService),
                 ),
               );
             },
@@ -93,7 +124,7 @@ class SettingsScreen extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.info),
             title: const Text('О приложении'),
-            subtitle: const Text('Версия 2.1.2+24'),
+            subtitle: Text('Версия $_appVersion'),
           ),
         ],
       ),

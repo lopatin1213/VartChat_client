@@ -46,17 +46,12 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
-    // Инициализируем последовательно, чтобы не было гонки сокетов
     _initSequence();
   }
 
   Future<void> _initSequence() async {
     await _loadSavedServer();
-
-    // Ждем, пока пользователь выберет сервер (если дебаг)
     await _checkDebugServer();
-
-    // Только после выбора сервера пытаемся восстановить сессию
     if (mounted) {
       await _tryRestoreSession();
     }
@@ -245,6 +240,9 @@ class _LoginScreenState extends State<LoginScreen> {
           final firstName = _firstNameController.text.trim();
           final lastName = _lastNameController.text.trim();
           final username = _usernameController.text.trim();
+
+          final phoneHash = CryptoService.hashPhone(phone);
+
           await _wsService.sendAuth(
             'register',
             phone,
@@ -254,6 +252,7 @@ class _LoginScreenState extends State<LoginScreen> {
             username: username.isEmpty ? null : username,
             device: deviceName,
             fcmToken: FcmService.token,
+            phoneHash: phoneHash,
           );
         } else {
           await _wsService.sendAuth(

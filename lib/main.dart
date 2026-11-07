@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:vartchat/screens/splash_screen.dart';
 import 'screens/login_screen.dart';
 import 'models/message.dart';
 import 'models/chat.dart';
@@ -39,7 +40,7 @@ Future<void> _bootstrap() async {
     print('>>> [MAIN] 2. Binding готов');
 
     print('>>> [MAIN] 3. Инициализируем Notifications...');
-    await NotificationService.init().timeout(const Duration(seconds: 3));
+    await NotificationService.init();
     print('>>> [MAIN] 4. Notifications OK');
 
     print('>>> [MAIN] 5. Инициализируем FCM...');
@@ -140,7 +141,7 @@ class MyApp extends StatelessWidget {
         brightness: Brightness.dark,
         colorSchemeSeed: Colors.deepPurple,
       ),
-      home: const LoginScreen(),
+      home: const SplashScreen(),
     );
   }
 }

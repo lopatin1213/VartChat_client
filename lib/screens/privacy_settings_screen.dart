@@ -54,7 +54,7 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
   }
 
   void _sendSettings() {
-    widget.wsService.sendCommand('/update_settings ${_hidePhone ? 1 : 0}|$_lastSeenPrivacy');
+    widget.wsService.sendSecureCommand('/update_settings ${_hidePhone ? 1 : 0}|$_lastSeenPrivacy');
   }
 
   @override

@@ -1757,12 +1757,16 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   AppBar _buildNormalAppBar() {
-    final String displayName = widget.titleOverride ?? (widget.chatName == 'system' ? 'VartChat System' : widget.chatName.replaceFirst(RegExp(r'^[#&]'), ''));
+    final String displayName = (widget.chatName == widget.username)
+        ? 'Избранное' : (widget.titleOverride ?? (widget.chatName == 'system' ? 'VartChat System' : widget.chatName.replaceFirst(RegExp(r'^[#&]'), '')));
     final bool isGroup = widget.chatName.startsWith('#');
     final bool isChannel = widget.chatName.startsWith('&');
     final bool isSystem = widget.chatName == 'system';
 
-    final IconData leadingIcon = isSystem
+
+    final IconData leadingIcon =
+    (widget.chatName == widget.username)
+    ? Icons.bookmark_outline : isSystem
         ? Icons.verified_user
         : (isGroup ? Icons.group : (isChannel ? Icons.campaign : Icons.person));
 

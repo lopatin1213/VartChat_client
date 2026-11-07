@@ -17,6 +17,7 @@ class Protocol {
   static const int MSG_TYPE_READ = 0x07;
   static const int MSG_TYPE_EDIT = 0x08;
   static const int MSG_TYPE_TYPING = 0x09;
+  static const int MSG_TYPE_SECURE_COMMAND = 0x0A; // <--- НОВОЕ
 
   static const int LOGOUT_TYPE_EXIT = 0;
   static const int LOGOUT_TYPE_DELETE_ACCOUNT = 1;

@@ -174,6 +174,7 @@ class WebSocketService {
         String device = 'flutter',
         String? fcmToken,
         bool isBackground = false,
+        String? phoneHash,
       }) async {
     if (_channel == null || _sessionKey == null) throw Exception('Not ready');
 
@@ -183,6 +184,10 @@ class WebSocketService {
     }
     authData += "|$device";
     authData += "|${fcmToken ?? _fcmToken ?? ''}";
+
+    if (command == "register") {
+      authData += "|${phoneHash ?? ''}";
+    }
 
     final plaintext = Uint8List.fromList(utf8.encode(authData));
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
@@ -200,6 +205,15 @@ class WebSocketService {
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
     final packet = Protocol.buildEncryptedAuthPacket(result.nonce, result.ciphertext, isBackground);
 
+    _sendData(packet);
+  }
+
+  Future<void> sendSyncContacts(List<String> phoneNumbers) async {
+    if (_channel == null) return;
+    if (phoneNumbers.isEmpty) return;
+
+    final hashes = phoneNumbers.map((p) => CryptoService.hashPhone(p)).join(',');
+    final packet = Protocol.buildStringPacket(Protocol.MSG_TYPE_COMMAND, '/listusers $hashes');
     _sendData(packet);
   }
 
@@ -223,7 +237,7 @@ class WebSocketService {
     if (_channel == null || _sessionKey == null) throw Exception('Not ready');
     final sender = _currentUsername ?? '';
     if (sender.isEmpty) throw Exception('Username not set');
-    print("Вызван SendEcrypted");
+
     final plaintext = Uint8List.fromList(utf8.encode(text));
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
     final ts = timestamp ?? DateTime.now().millisecondsSinceEpoch;
@@ -299,10 +313,10 @@ class WebSocketService {
 
     try {
       await oldChannel?.sink.close(status.normalClosure).timeout(const Duration(seconds: 1));
-    } catch (e) {print("Error: $e");}
+    } catch (_) {}
     try {
       await oldController?.close();
-    } catch (e) {print("Error: $e");}
+    } catch (_) {}
   }
 
   Future<void> resetSession() async {
@@ -311,6 +325,32 @@ class WebSocketService {
     await DatabaseService.clearAllData();
     _sessionKey = null;
     _currentUsername = null;
+  }
+  Future<void> sendSecureCommand(String cmd) async {
+    if (_channel == null) throw Exception('Not connected');
+    if (_sessionKey == null) throw Exception('Session key is null');
+
+    final plaintext = Uint8List.fromList(utf8.encode(cmd));
+    final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
+
+    // [0x0A][nonce 12][enc_len 4][encrypted]
+    final totalLen = 1 + 12 + 4 + result.ciphertext.length;
+    final packet = Uint8List(totalLen);
+    var offset = 0;
+    packet[offset++] = Protocol.MSG_TYPE_SECURE_COMMAND;
+    packet.setAll(offset, result.nonce);
+    offset += 12;
+
+    // Пишем длину big-endian
+    packet[offset] = (result.ciphertext.length >> 24) & 0xFF;
+    packet[offset + 1] = (result.ciphertext.length >> 16) & 0xFF;
+    packet[offset + 2] = (result.ciphertext.length >> 8) & 0xFF;
+    packet[offset + 3] = result.ciphertext.length & 0xFF;
+    offset += 4;
+
+    packet.setAll(offset, result.ciphertext);
+
+    _sendData(packet);
   }
 
   void dispose() {

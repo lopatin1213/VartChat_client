@@ -31,7 +31,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
     }
 
     setState(() => _isLoading = true);
-    widget.wsService.sendCommand('/change_password ${_oldCtrl.text}|${_newCtrl.text}');
+    widget.wsService.sendSecureCommand('/change_password ${_oldCtrl.text}|${_newCtrl.text}');
 
     // Мы не ждем ответа от сервера, так как это отдельный экран.
     // Сервер пришлет системное сообщение, но для простоты просто закроем экран.

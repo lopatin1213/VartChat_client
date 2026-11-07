@@ -6,10 +6,10 @@ class StorageService {
   static const String _keyUsername = 'username';
   static const String _keyUserId = 'userId';
   static const String _keyToken = 'token';
+  static const String _keyLastContactsSync = 'last_contacts_sync';
 
   static const _secureStorage = FlutterSecureStorage();
 
-  // --- Сервер, Юзернейм, ID (не секретные) ---
   static Future<void> saveServer(String server) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_keyServer, server);
@@ -37,7 +37,16 @@ class StorageService {
     return prefs.getString(_keyUserId);
   }
 
-  // --- Токен (СЕКРЕТНЫЙ) ---
+  static Future<void> saveLastContactsSync(int timestamp) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyLastContactsSync, timestamp);
+  }
+
+  static Future<int> getLastContactsSync() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_keyLastContactsSync) ?? 0;
+  }
+
   static Future<void> saveToken(String token) async {
     await _secureStorage.write(key: _keyToken, value: token);
   }
@@ -51,8 +60,10 @@ class StorageService {
     await prefs.remove(_keyServer);
     await prefs.remove(_keyUsername);
     await prefs.remove(_keyUserId);
+    await prefs.remove(_keyLastContactsSync);
     await _secureStorage.delete(key: _keyToken);
   }
+
   static Future<void> savePendingReply(String chatKey, String text) async {
     await _secureStorage.write(key: 'pending_reply_chat', value: chatKey);
     await _secureStorage.write(key: 'pending_reply_text', value: text);

@@ -31,6 +31,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
   bool _isLoading = true;
   bool _hasLoaded = false;
+  bool _isContact = false;
   StreamSubscription? _sub;
 
   final _fnameCtrl = TextEditingController();
@@ -64,9 +65,18 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       final parsed = Protocol.parsePacket(data);
       if (parsed.type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(parsed.payload, 0);
+
+        if (text.startsWith('[Система] Пользователь ') && text.endsWith(' добавлен в контакты')) {
+          setState(() => _isContact = true);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Добавлено в контакты'), backgroundColor: Colors.green),
+          );
+          return;
+        }
+
         if (text.startsWith('[Система] Профиль|')) {
           final parts = text.substring('[Система] Профиль|'.length).split('|');
-          if (parts.length >= 8) {
+          if (parts.length >= 10) {
             setState(() {
               _fetchedUsername = parts[0];
               _phone = parts[1];
@@ -77,7 +87,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               _status = parts[6];
               final lastSeen = int.tryParse(parts[7]) ?? 0;
 
-              // ЛОГИКА СТАТУСА
               if (_status == 'скрыт' || (_status == 'офлайн' && lastSeen == 0)) {
                 _status = 'был(а) недавно';
               } else if (_status == 'офлайн' && lastSeen > 0) {
@@ -146,6 +155,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     });
 
     Navigator.pop(context);
+  }
+
+  void _addToContacts() {
+    widget.wsService.sendCommand('/add_contact ${widget.username}');
   }
 
   @override
@@ -268,6 +281,19 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   ],
                 ),
               ),
+              const SizedBox(height: 24),
+              if (!_isContact)
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _addToContacts,
+                    icon: const Icon(Icons.person_add),
+                    label: const Text('Добавить в контакты'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                  ),
+                ),
             ],
           ],
         ),

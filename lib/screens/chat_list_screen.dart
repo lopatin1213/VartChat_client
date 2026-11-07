@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:flutter_contacts/flutter_contacts.dart';
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
 import '../services/crypto_service.dart';
@@ -14,7 +17,6 @@ import '../models/message.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
 import 'settings_screen.dart';
-import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 
 enum ViewMode { chats, contacts, groups, channels }
 
@@ -46,7 +48,9 @@ class _ChatListScreenState extends State<ChatListScreen>
   static const double _scrollTopThreshold = 400;
   static const Duration _getMsgBatchDelay = Duration(milliseconds: 150);
 
-  List<({String phone, String username, String displayName})> _contacts = [];
+
+  List<({String phone, String username, String displayName, String firstName, String lastName})> _contacts = [];
+  final Map<String, ({String firstName, String lastName})> _localContacts = {};
   List<String> _groups = [];
   final Map<String, bool> _groupMembership = {};
   final Map<String, String> _groupCreators = {};
@@ -59,9 +63,9 @@ class _ChatListScreenState extends State<ChatListScreen>
   String? _selectedChat;
   String? _lastRenderedChat;
   bool _chatOpen = false;
-  StreamSubscription? _sharingSub;
 
   StreamSubscription? _subscription;
+  StreamSubscription? _sharingSub;
   Timer? _reconnectTimer;
   Timer? _periodicTimer;
   int _reconnectAttempts = 0;
@@ -195,13 +199,13 @@ class _ChatListScreenState extends State<ChatListScreen>
   @override
   void initState() {
     super.initState();
-    print('>>> [CHAT_LIST] initState вызван');
     WidgetsBinding.instance.addObserver(this);
 
     _loadServerAddress();
     _loadMessagesFromHive();
     _subscribeToMessages();
-    _refreshChats();
+    _syncContactsIfNeeded();
+    _initSharingListener();
 
     _checkPendingReply();
 
@@ -216,7 +220,6 @@ class _ChatListScreenState extends State<ChatListScreen>
         setState(() => _isConnecting = false);
       }
     });
-    _initSharingListener();
   }
 
   Future<void> _checkPendingReply() async {
@@ -237,6 +240,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     _replyCache.clear();
     _requestedReplyIds.clear();
     _outbox.clear();
+    _sharingSub?.cancel();
     for (final c in _draftControllers.values) {
       c.dispose();
     }
@@ -245,11 +249,8 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
     _chatFocusNode.dispose();
     _subscription?.cancel();
-    _sharingSub?.cancel();
     super.dispose();
   }
-
-
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -283,7 +284,6 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   void _loadMessagesFromHive() {
     final allMessages = DatabaseService.getAllMessages();
-    // Сортируем по ID сервера (если он есть), чтобы избежать рассинхрона времени
     allMessages.sort((a, b) {
       if (a.id > 0 && b.id > 0) {
         return a.id.compareTo(b.id);
@@ -370,7 +370,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       edited: edited,
       );
       list.add(merged);
-      // Сортируем по ID сервера, чтобы избежать рассинхрона времени
       list.sort((a, b) {
         if (a.id > 0 && b.id > 0) {
           return a.id.compareTo(b.id);
@@ -556,9 +555,82 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
+  Future<List<({String phone, String firstName, String lastName})>> _getPhoneContacts() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return [];
+    }
+
+    try {
+      final status = await FlutterContacts.permissions.request(PermissionType.read);
+      if (status != PermissionStatus.granted && status != PermissionStatus.limited) {
+        print('>>> [SYNC] Разрешение на контакты не выдано: $status');
+        return [];
+      }
+
+      final contacts = await FlutterContacts.getAll(
+        properties: {ContactProperty.phone, ContactProperty.name},
+      );
+
+      final res = <({String phone, String firstName, String lastName})>[];
+      for (final contact in contacts) {
+        // ИСПРАВЛЕНИЕ: contact.name может быть null, используем ?.
+        final fName = contact.name?.first ?? '';
+        final lName = contact.name?.last ?? '';
+        for (final phone in contact.phones) {
+          final clean = phone.number.replaceAll(RegExp(r'[^\d+]'), '');
+          if (clean.isNotEmpty) {
+            res.add((phone: clean, firstName: fName, lastName: lName));
+          }
+        }
+      }
+      print('>>> [SYNC] Найдено номеров в телефонной книге: ${res.length}');
+      return res;
+    } catch (e) {
+      print('>>> [SYNC] Ошибка чтения контактов: $e');
+      return [];
+    }
+  }
+
+
+  Future<void> _syncContactsIfNeeded() async {
+    // 1. ВСЕГДА читаем телефонную книгу для локального кэша имен
+    final localPhones = await _getPhoneContacts();
+
+    _localContacts.clear();
+    for (final p in localPhones) {
+      _localContacts[p.phone] = (firstName: p.firstName, lastName: p.lastName);
+    }
+
+    // 2. Раз в 24 часа — синхронизируем хэши с сервером
+    final lastSync = await StorageService.getLastContactsSync();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    const day = 24 * 60 * 60 * 1000;
+
+    if (now - lastSync > day) {
+      final phonesToSend = localPhones.map((p) => p.phone).toList();
+      if (phonesToSend.isNotEmpty) {
+        print('>>> [SYNC] Полная синхронизация контактов (${phonesToSend.length} шт.)');
+        await widget.wsService.sendSyncContacts(phonesToSend);
+        await StorageService.saveLastContactsSync(now);
+      } else {
+        print('>>> [SYNC] Телефонная книга пуста, запрашиваем существующие контакты');
+        widget.wsService.sendCommand('/listusers contacts');
+      }
+    } else {
+      print('>>> [SYNC] Синхронизация не требуется, запрашиваем существующие контакты');
+      widget.wsService.sendCommand('/listusers contacts');
+    }
+    widget.wsService.sendCommand('/listusers history');
+  }
+
   void _refreshChats() {
     try {
-      widget.wsService.sendCommand('/listusers history');
+      _syncContactsIfNeeded();
+
+      // ВАЖНО: Запрашиваем историю, чтобы не потерять тех, кого нет в контактах
+
+
+
       widget.wsService.sendCommand('/listgroups');
       widget.wsService.sendCommand('/channels');
       widget.wsService.sendCommand('/onlineusers');
@@ -791,46 +863,54 @@ class _ChatListScreenState extends State<ChatListScreen>
               .trim();
           if (!mounted) return;
           if (usersPart == 'Нет зарегистрированных пользователей') {
-            setState(() {
-              _contacts = [];
-              _lastSeen.clear();
-            });
+            // Ничего не делаем
           } else {
             final items = usersPart.split(',').map((s) => s.trim()).toList();
-            final parsedList =
-            <({String phone, String username, String displayName})>[];
             final newLastSeen = <String, int>{};
-            for (final item in items) {
-              final parts = item.split('|');
-              if (parts.length >= 2) {
-                final phone = parts[0].trim();
-                final username = parts[1].trim();
 
-                if (username == 'system') continue;
+            setState(() {
+              final existingUsernames = _contacts.map((c) => c.username).toSet();
 
-                final displayName =
-                parts.length > 2 && parts[2].trim().isNotEmpty
-                    ? parts[2].trim()
-                    : username;
-                final lastSeen = parts.length > 3
-                    ? int.tryParse(parts[3].trim())
-                    : null;
-                if (username.isNotEmpty) {
-                  parsedList.add((
-                  phone: phone,
-                  username: username,
-                  displayName: displayName,
-                  ));
-                  if (lastSeen != null && lastSeen > 0)
+              for (final item in items) {
+                final parts = item.split('|');
+                if (parts.length >= 2) {
+                  final phone = parts[0].trim();
+                  final username = parts[1].trim();
+                  if (username == 'system') continue;
+
+                  final serverDisplayName = parts.length > 2 && parts[2].trim().isNotEmpty
+                      ? parts[2].trim()
+                      : username;
+                  final lastSeen = parts.length > 3 ? int.tryParse(parts[3].trim()) : null;
+
+                  // Ищем имя в локальной телефонной книге
+                  final localInfo = _localContacts[phone];
+                  final localFirst = localInfo?.firstName ?? '';
+                  final localLast = localInfo?.lastName ?? '';
+
+                  // Если в телефонной книге есть имя или фамилия, используем их
+                  final finalDisplayName = (localFirst.isNotEmpty || localLast.isNotEmpty)
+                      ? '$localFirst $localLast'.trim()
+                      : serverDisplayName;
+
+                  if (username.isNotEmpty && !existingUsernames.contains(username)) {
+                    _contacts.add((
+                    phone: phone,
+                    username: username,
+                    displayName: finalDisplayName,
+                    firstName: localFirst,
+                    lastName: localLast,
+                    ));
+                    existingUsernames.add(username);
+                  }
+
+                  if (lastSeen != null && lastSeen > 0) {
                     newLastSeen[username] = lastSeen;
+                  }
                 }
               }
-            }
-            setState(() {
-              _contacts = parsedList;
-              _lastSeen
-                ..clear()
-                ..addAll(newLastSeen);
+
+              _lastSeen.addAll(newLastSeen);
             });
           }
           if (_isConnecting && mounted) setState(() => _isConnecting = false);
@@ -921,13 +1001,14 @@ class _ChatListScreenState extends State<ChatListScreen>
           if (_isConnecting && mounted) setState(() => _isConnecting = false);
           return;
         }
+
         if (text.startsWith('[Система] Профиль|') ||
             text.startsWith('[Система] Сессии:') ||
             text.startsWith('[Система] Пароль успешно изменен') ||
             text.startsWith('[Система] Настройки приватности обновлены') ||
             text.startsWith('[Система] Профиль успешно обновлен') ||
-            text.startsWith('[Система] Устройство успешно отключено'
-            )) {
+            text.startsWith('[Система] Устройство успешно отключено') ||
+            (text.startsWith('[Система] Пользователь ') && text.endsWith(' добавлен в контакты'))) {
           return;
         }
 
@@ -1301,6 +1382,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   String _displayNameFor(String username) {
     if (username == 'system') return 'VartChat System';
+    if (username == widget.username) return 'Избранное';
     for (final c in _contacts) {
       if (c.username == username) return c.displayName;
     }
@@ -1532,6 +1614,84 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
+  void _initSharingListener() async {
+    final initialMedia = await ReceiveSharingIntent.instance.getInitialMedia();
+    if (initialMedia.isNotEmpty) {
+      final text = initialMedia.map((m) => m.path ?? '').join('\n');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _handleSharedText(text);
+      });
+      ReceiveSharingIntent.instance.reset();
+    }
+
+    _sharingSub = ReceiveSharingIntent.instance.getMediaStream().listen(
+          (List<SharedMediaFile> value) {
+        if (value.isNotEmpty) {
+          final text = value.map((m) => m.path ?? '').join('\n');
+          _handleSharedText(text);
+        }
+      },
+      onError: (err) {
+        print('[SHARE] Ошибка: $err');
+      },
+    );
+  }
+
+  void _handleSharedText(String text) {
+    if (text.isEmpty || !mounted) return;
+
+    if (_messages.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Подождите, чаты загружаются... Попробуйте еще раз через секунду.')),
+      );
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Text(
+                'Отправить в...',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: _messages.keys.map((chatKey) {
+                  final isGroup = chatKey.startsWith('#');
+                  final isChannel = chatKey.startsWith('&');
+                  final displayName = isGroup || isChannel
+                      ? chatKey.substring(1)
+                      : _displayNameFor(chatKey);
+
+                  return ListTile(
+                    leading: Icon(
+                      isGroup ? Icons.group : (isChannel ? Icons.campaign : Icons.person),
+                    ),
+                    title: Text(displayName),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _sendMessage(chatKey, text);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Отправлено в $displayName')),
+                      );
+                    },
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildAvatarWithStatus(String username, IconData icon) {
     final isOnline =
         username != widget.username && _onlineUsers.contains(username);
@@ -1559,87 +1719,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       ],
     );
   }
-  void _initSharingListener() async {
-    // 1. Обработка шаринга, когда приложение было закрыто
-    final initialText = await ReceiveSharingIntent.instance.getInitialMedia();
-    if (initialText.isNotEmpty) {
-      final text = initialText.map((m) => m.path ?? '').join('\n');
-      _handleSharedText(text);
-      ReceiveSharingIntent.instance.reset();
-    }
-
-    // 2. Обработка шаринга, когда приложение уже открыто
-    _sharingSub = ReceiveSharingIntent.instance.getMediaStream().listen(
-          (List<SharedMediaFile> value) {
-        if (value.isNotEmpty) {
-          final text = value.map((m) => m.path ?? '').join('\n');
-          _handleSharedText(text);
-        }
-      },
-      onError: (err) {
-        print('[SHARE] Ошибка: $err');
-      },
-    );
-  }
-
-  void _handleSharedText(String text) {
-    try {
-      print("Вызван");
-      if (text.isEmpty || !mounted) return;
-
-      // Показываем нижний лист с выбором чата
-      showModalBottomSheet(
-        context: context,
-        builder: (ctx) =>
-            SafeArea(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.all(16.0),
-                    child: Text(
-                      'Отправить в...',
-                      style: TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                  Expanded(
-                    child: ListView(
-                      children: _messages.keys.map((chatKey) {
-                        final isGroup = chatKey.startsWith('#');
-                        final isChannel = chatKey.startsWith('&');
-                        final displayName = isGroup || isChannel
-                            ? chatKey.substring(1)
-                            : _displayNameFor(chatKey);
-
-                        return ListTile(
-                          leading: Icon(
-                            isGroup ? Icons.group : (isChannel
-                                ? Icons.campaign
-                                : Icons.person),
-                          ),
-                          title: Text(displayName),
-                          onTap: () {
-                            Navigator.pop(ctx);
-                            _sendMessage(chatKey, text);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                  content: Text('Отправлено в $displayName')),
-                            );
-                          },
-                        );
-                      }).toList(),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-      );
-    }catch (e){
-      print(e);
-    }
-
-  }
 
   Widget _buildCurrentList() {
     switch (_currentView) {
@@ -1653,9 +1732,14 @@ class _ChatListScreenState extends State<ChatListScreen>
           itemCount: _contacts.length,
           itemBuilder: (context, index) {
             final contact = _contacts[index];
+            // Приоритет: локальное имя -> display_name сервера -> username
+            final titleText = contact.displayName.isNotEmpty
+                ? contact.displayName
+                : contact.username;
+
             return ListTile(
               leading: _buildAvatarWithStatus(contact.username, Icons.person),
-              title: Text(contact.displayName),
+              title: Text(titleText),
               subtitle: Text(contact.phone),
               onTap: () {
                 if (!_messages.containsKey(contact.username)) {
@@ -1667,7 +1751,6 @@ class _ChatListScreenState extends State<ChatListScreen>
             );
           },
         );
-
       case ViewMode.groups:
         if (_groups.isEmpty) {
           return const Center(child: Text('Нет ни одной группы'));
@@ -1778,14 +1861,17 @@ class _ChatListScreenState extends State<ChatListScreen>
             final chatKey = entry.key;
             final lastMessage = entry.value.last;
             final bool isGroup = chatKey.startsWith('#');
+            final bool isSystem = (chatKey == 'system');
             final bool isChannel = chatKey.startsWith('&');
             final bool isPersonal = !isGroup && !isChannel;
             final String displayName = isPersonal
                 ? _displayNameFor(chatKey)
                 : chatKey.replaceFirst(RegExp(r'^[#&]'), '');
-            final IconData icon = isGroup
+            final IconData icon = (chatKey == widget.username)
+            ? Icons.bookmark_outlined :
+            isGroup
                 ? Icons.group
-                : (isChannel ? Icons.campaign : Icons.person);
+                : (isChannel ? Icons.campaign : isSystem ? Icons.verified_user_rounded :Icons.person);
             final leading = isPersonal
                 ? _buildAvatarWithStatus(chatKey, icon)
                 : Icon(icon);

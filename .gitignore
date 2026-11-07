@@ -54,3 +54,4 @@ app.*.map.json
 *.zip
 pepk.jar
 /android/build/reports/problems/problems-report.html
+/android/.kotlin/sessions/kotlin-compiler-17879606089247075234.salive

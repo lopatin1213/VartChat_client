@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ai_chat_markdown/flutter_ai_chat_markdown.dart';
 import 'package:flutter_sdui_kit/flutter_sdui_kit.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
 import 'user_profile_screen.dart';
@@ -21,6 +23,7 @@ bool readMe,
 bool readAny,
 int? views,
 bool edited,
+String reactionsJson,
 });
 
 typedef ReplyPreview = ({String sender, String text, bool isMe});
@@ -55,6 +58,7 @@ class ChatScreen extends StatefulWidget {
   final VoidCallback? onCancelReply;
   final ReplyPreview? Function(int replyToId)? resolveReply;
   final List<String> typingUsers;
+  final void Function(int msgId, String emoji)? onReaction;
 
   const ChatScreen({
     super.key,
@@ -85,6 +89,7 @@ class ChatScreen extends StatefulWidget {
     this.onCancelReply,
     this.resolveReply,
     this.typingUsers = const [],
+    this.onReaction,
   });
 
   @override
@@ -106,6 +111,7 @@ class ChatScreenState extends State<ChatScreen> {
   int _scrollGeneration = 0;
   bool _isAtBottom = true;
   int _lastMessagesLength = 0;
+  bool _showEmojiPicker = false;
 
   static final ValueNotifier<bool> _intrinsicWidthDisabled =
   ValueNotifier<bool>(false);
@@ -137,12 +143,21 @@ class ChatScreenState extends State<ChatScreen> {
     };
   }
 
+  void _handleFocusChange() {
+    if (widget.focusNode?.hasFocus == true && _showEmojiPicker) {
+      setState(() {
+        _showEmojiPicker = false;
+      });
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _lastMessagesLength = widget.messages.length;
 
     widget.controller.addListener(_onTextChanged);
+    widget.focusNode?.addListener(_handleFocusChange);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -172,9 +187,14 @@ class ChatScreenState extends State<ChatScreen> {
       oldWidget.scrollController?.removeListener(_onScrollListener);
       widget.scrollController?.addListener(_onScrollListener);
     }
+    if (oldWidget.focusNode != widget.focusNode) {
+      oldWidget.focusNode?.removeListener(_handleFocusChange);
+      widget.focusNode?.addListener(_handleFocusChange);
+    }
     if (oldWidget.chatName != widget.chatName) {
       _editingMsgId = null;
       _savedDraft = null;
+      _showEmojiPicker = false;
     }
     _handleNewMessages();
   }
@@ -189,6 +209,7 @@ class ChatScreenState extends State<ChatScreen> {
       );
     }
     widget.controller.removeListener(_onTextChanged);
+    widget.focusNode?.removeListener(_handleFocusChange);
     _presenceTimer?.cancel();
     widget.scrollController?.removeListener(_onScrollListener);
     _msgKeys.clear();
@@ -210,9 +231,6 @@ class ChatScreenState extends State<ChatScreen> {
         : Protocol.MSG_KIND_PERSONAL);
 
     if (kind != Protocol.MSG_KIND_CHANNEL) {
-      print(
-        '[TYPING] Отправляю пакет: $kind -> ${widget.chatName}',
-      );
       widget.wsService.sendTyping(kind, widget.chatName);
     }
   }
@@ -782,7 +800,64 @@ class ChatScreenState extends State<ChatScreen> {
       bool isMe,
       RelativeRect position,
       ) async {
+    final quickReactions = ['❤️', '👍', '👎', '🔥', '🥰', '👏', '😁', '🤔'];
+
+    String currentReactionsJson = '{}';
+    for (final m in widget.messages) {
+      if (m.id == msgId) {
+        currentReactionsJson = m.reactionsJson;
+        break;
+      }
+    }
+    final Map<String, dynamic> currentReacts = jsonDecode(currentReactionsJson);
+
+    final reactionWidgets = quickReactions.map((emoji) {
+      final users = List<String>.from(currentReacts[emoji] ?? []);
+      final isReactedByMe = users.contains(widget.username);
+
+      return GestureDetector(
+        onTap: () {
+          Navigator.pop(context);
+          if (msgId != 0) {
+            widget.onReaction?.call(msgId, emoji);
+          }
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+          decoration: BoxDecoration(
+            color: isReactedByMe ? Colors.blue.withValues(alpha: 0.2) : Colors.transparent,
+            shape: BoxShape.circle,
+          ),
+          child: Text(emoji, style: const TextStyle(fontSize: 22)),
+        ),
+      );
+    }).toList();
+
+    reactionWidgets.add(
+      GestureDetector(
+        onTap: () {
+          Navigator.pop(context);
+          _showCustomEmojiPicker(msgId, position); // ПЕРЕДАЕМ ПОЗИЦИЮ
+        },
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          child: Icon(Icons.expand_more, size: 24, color: Colors.grey),
+        ),
+      ),
+    );
+
     final items = <PopupMenuEntry<String>>[
+      PopupMenuItem<String>(
+        enabled: false,
+        height: 48,
+        padding: const EdgeInsets.symmetric(horizontal: 4.0),
+        child: Wrap(
+          alignment: WrapAlignment.spaceEvenly,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: reactionWidgets,
+        ),
+      ),
+      const PopupMenuDivider(height: 1),
       const PopupMenuItem<String>(
         value: 'reply',
         height: 44,
@@ -887,6 +962,75 @@ class ChatScreenState extends State<ChatScreen> {
     } else if (result == 'report') {
       _showReportDialog(msgId);
     }
+  }
+
+  void _showCustomEmojiPicker(int msgId, RelativeRect position) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.transparent, // Без темной подложки
+      builder: (ctx) {
+        final size = MediaQuery.of(ctx).size;
+
+        double left = position.left;
+        double top = position.top;
+
+        const pickerWidth = 320.0;
+        const pickerHeight = 350.0;
+
+        // Ограничиваем позицию, чтобы окно не улетело за экран
+        if (left + pickerWidth > size.width) {
+          left = size.width - pickerWidth - 16;
+        }
+        if (top + pickerHeight > size.height) {
+          top = size.height - pickerHeight - 16;
+        }
+        if (left < 16) left = 16;
+        if (top < 16) top = 16;
+
+        return Stack(
+          children: [
+            Positioned(
+              left: left,
+              top: top,
+              child: Material(
+                elevation: 8,
+                borderRadius: BorderRadius.circular(16),
+                clipBehavior: Clip.antiAlias,
+                color: Theme.of(ctx).cardColor,
+                child: SizedBox(
+                  width: pickerWidth,
+                  height: pickerHeight,
+                  child: EmojiPicker(
+                    onEmojiSelected: (category, emoji) {
+                      Navigator.pop(ctx);
+                      if (msgId != 0) {
+                        widget.onReaction?.call(msgId, emoji.emoji);
+                      }
+                    },
+                    config: Config(
+                      checkPlatformCompatibility: true,
+                      emojiViewConfig: EmojiViewConfig(
+                        backgroundColor: Theme.of(ctx).cardColor,
+                        columns: 8,
+                        emojiSizeMax: 24,
+                      ),
+                      categoryViewConfig: CategoryViewConfig(
+                        backgroundColor: Theme.of(ctx).cardColor,
+                        iconColor: Colors.grey,
+                        iconColorSelected: Theme.of(ctx).primaryColor,
+                      ),
+                      searchViewConfig: SearchViewConfig(
+                        backgroundColor: Theme.of(ctx).cardColor,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   void _showReportDialog(int msgId) {
@@ -1264,6 +1408,7 @@ class ChatScreenState extends State<ChatScreen> {
       bool edited,
       bool isGroupOrChannel,
       double maxWidth,
+      String reactionsJson,
       ) {
     final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
     final backgroundColor = isMe
@@ -1322,6 +1467,55 @@ class ChatScreenState extends State<ChatScreen> {
       );
     }
 
+    final Map<String, dynamic> reactions = jsonDecode(reactionsJson);
+    final reactionWidgets = <Widget>[];
+    if (reactions.isNotEmpty) {
+      reactions.forEach((emoji, users) {
+        final userList = List<String>.from(users);
+        final count = userList.length;
+        final showWho = !isGroupOrChannel || count < 2;
+
+        String display = emoji;
+        if (showWho) {
+          final List<String> names = [];
+          for (final u in userList) {
+            final displayName = widget.resolveDisplayName?.call(u) ?? u;
+            names.add(displayName.isNotEmpty ? displayName[0].toUpperCase() : '?');
+          }
+          display += ' ${names.join(', ')}';
+        } else {
+          display += ' $count';
+        }
+
+        final isMeInList = userList.contains(widget.username);
+
+        reactionWidgets.add(
+          GestureDetector(
+            onTap: () {
+              widget.onReaction?.call(msgId, emoji);
+            },
+            child: Container(
+              margin: const EdgeInsets.only(right: 4, top: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: isMeInList
+                    ? Theme.of(context).primaryColor.withValues(alpha: 0.3)
+                    : Colors.black.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+                border: isMeInList
+                    ? Border.all(color: Theme.of(context).primaryColor, width: 1)
+                    : null,
+              ),
+              child: Text(
+                display,
+                style: TextStyle(fontSize: 14, color: textColor),
+              ),
+            ),
+          ),
+        );
+      });
+    }
+
     final bubbleContent = Container(
       constraints: BoxConstraints(maxWidth: maxWidth),
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
@@ -1357,6 +1551,15 @@ class ChatScreenState extends State<ChatScreen> {
               child: _buildReplyQuoteInBubble(quote, isMe, textColor),
             ),
           body,
+          if (reactionWidgets.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Wrap(
+                spacing: 4,
+                runSpacing: 4,
+                children: reactionWidgets,
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Row(
@@ -1393,6 +1596,7 @@ class ChatScreenState extends State<ChatScreen> {
                 readAny: readAny,
                 views: views,
                 edited: edited,
+                reactionsJson: reactionsJson,
                 ), textColor),
               ],
             ),
@@ -1594,6 +1798,19 @@ class ChatScreenState extends State<ChatScreen> {
       padding: padding,
       child: Row(
         children: [
+          IconButton(
+            icon: Icon(_showEmojiPicker ? Icons.keyboard : Icons.emoji_emotions_outlined),
+            onPressed: () {
+              setState(() {
+                _showEmojiPicker = !_showEmojiPicker;
+              });
+              if (_showEmojiPicker) {
+                widget.focusNode?.unfocus();
+              } else {
+                widget.focusNode?.requestFocus();
+              }
+            },
+          ),
           Expanded(
             child: CallbackShortcuts(
               bindings: {
@@ -1727,13 +1944,29 @@ class ChatScreenState extends State<ChatScreen> {
       previewBar = _buildReplyPreviewBar();
     }
 
+    final inputWidgets = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        previewBar,
+        _buildFormattingToolbar(),
+        _buildInputField(inputPadding),
+      ],
+    );
+
     if (!isChannel) {
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          previewBar,
-          _buildFormattingToolbar(),
-          _buildInputField(inputPadding),
+          inputWidgets,
+          if (_showEmojiPicker)
+            SizedBox(
+              height: 250,
+              child: EmojiPicker(
+                onEmojiSelected: (category, emoji) {
+                  widget.controller.text += emoji.emoji;
+                },
+              ),
+            ),
         ],
       );
     }
@@ -1744,9 +1977,16 @@ class ChatScreenState extends State<ChatScreen> {
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            previewBar,
-            _buildFormattingToolbar(),
-            _buildInputField(inputPadding),
+            inputWidgets,
+            if (_showEmojiPicker)
+              SizedBox(
+                height: 250,
+                child: EmojiPicker(
+                  onEmojiSelected: (category, emoji) {
+                    widget.controller.text += emoji.emoji;
+                  },
+                ),
+              ),
           ],
         );
       case ChannelRole.subscriber:
@@ -1766,7 +2006,7 @@ class ChatScreenState extends State<ChatScreen> {
 
     final IconData leadingIcon =
     (widget.chatName == widget.username)
-    ? Icons.bookmark_outline : isSystem
+        ? Icons.bookmark_outline : isSystem
         ? Icons.verified_user
         : (isGroup ? Icons.group : (isChannel ? Icons.campaign : Icons.person));
 
@@ -1923,9 +2163,6 @@ class ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    print(
-      '[TYPING UI] build ChatScreen, typingUsers = ${widget.typingUsers}',
-    );
     final msgs = widget.messages;
     final isGroupOrChannel =
         widget.chatName.startsWith('#') || widget.chatName.startsWith('&');
@@ -1958,6 +2195,7 @@ class ChatScreenState extends State<ChatScreen> {
           msg.edited,
           isGroupOrChannel,
           maxBubbleWidth,
+          msg.reactionsJson,
         ),
       );
     }

@@ -37,18 +37,31 @@ class _SplashScreenState extends State<SplashScreen> {
       return;
     }
 
-    try {
-      final wsService = WebSocketService();
-      wsService.setCredentials(username, fcmToken: FcmService.token);
+    final wsService = WebSocketService();
+    wsService.setCredentials(username, fcmToken: FcmService.token);
 
+    try {
       await wsService.connect(server);
+    } catch (e) {
+      print('>>> [SPLASH] Ошибка сети при подключении: $e');
+      _goToChatList(wsService, username);
+      return;
+    }
+
+    try {
       final hsErr = await wsService.performHandshake();
 
       if (hsErr != null) {
         _goToLogin();
         return;
       }
+    } catch (e) {
+      print('>>> [SPLASH] Ошибка handshake: $e');
+      _goToChatList(wsService, username);
+      return;
+    }
 
+    try {
       final completer = Completer<void>();
       final sub = wsService.onMessage.listen((data) {
         try {
@@ -71,19 +84,27 @@ class _SplashScreenState extends State<SplashScreen> {
       );
 
       sub.cancel();
-
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ChatListScreen(wsService: wsService, username: username),
-          ),
-        );
-      }
+      _goToChatList(wsService, username);
     } catch (e) {
       print('>>> [SPLASH] Ошибка авторизации: $e');
-      _goToLogin();
+      // Если мы дошли сюда, значит сеть вроде была, но токен не прошел или таймаут.
+      // В любом случае пускаем в ChatListScreen, где произойдет реконнект
+      // и корректная обработка протухшего токена (logout -> login).
+      _goToChatList(wsService, username);
     }
+  }
+
+  void _goToChatList(WebSocketService wsService, String username) {
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatListScreen(
+          wsService: wsService,
+          username: username,
+        ),
+      ),
+    );
   }
 
   void _goToLogin() {

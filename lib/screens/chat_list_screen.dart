@@ -204,7 +204,8 @@ class _ChatListScreenState extends State<ChatListScreen>
     _loadServerAddress();
     _loadMessagesFromHive();
     _subscribeToMessages();
-    _syncContactsIfNeeded();
+    _refreshChats();
+
     _initSharingListener();
 
     _checkPendingReply();
@@ -305,6 +306,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       readAny: msg.readAny,
       views: msg.views,
       edited: msg.edited,
+      reactionsJson: msg.reactionsJson,
       ));
     }
   }
@@ -353,6 +355,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       readAny: old.readAny || readAny,
       views: views ?? old.views,
       edited: newEdited,
+      reactionsJson: old.reactionsJson,
       );
       list[idx] = merged;
     } else {
@@ -368,6 +371,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       readAny: readAny,
       views: views,
       edited: edited,
+      reactionsJson: '{}',
       );
       list.add(merged);
       list.sort((a, b) {
@@ -392,6 +396,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       readAny: merged.readAny,
       views: merged.views,
       edited: merged.edited,
+      reactionsJson: merged.reactionsJson,
     );
     DatabaseService.saveMessage(message);
   }
@@ -434,12 +439,15 @@ class _ChatListScreenState extends State<ChatListScreen>
     final list = _messages[chatKey];
     if (list == null) return;
 
+    final kind = _kindForChat(chatKey);
+
     setState(() {
       for (final id in ids) {
         final idx = list.indexWhere((m) => m.id == id);
         if (idx < 0) continue;
         final m = list[idx];
-        if (m.readMe) continue;
+        if (m.readMe && (kind != Protocol.MSG_KIND_GROUP || m.readAny)) continue;
+
         final updated = (
         id: m.id,
         clientMsgId: m.clientMsgId,
@@ -449,9 +457,10 @@ class _ChatListScreenState extends State<ChatListScreen>
         timestamp: m.timestamp,
         replyToId: m.replyToId,
         readMe: true,
-        readAny: m.readAny,
+        readAny: (kind == Protocol.MSG_KIND_GROUP) ? true : m.readAny,
         views: m.views,
         edited: m.edited,
+        reactionsJson: m.reactionsJson,
         );
         list[idx] = updated;
         DatabaseService.saveMessage(
@@ -464,9 +473,10 @@ class _ChatListScreenState extends State<ChatListScreen>
             timestamp: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
             replyToId: m.replyToId,
             readMe: true,
-            readAny: m.readAny,
+            readAny: (kind == Protocol.MSG_KIND_GROUP) ? true : m.readAny,
             views: m.views,
             edited: m.edited,
+            reactionsJson: m.reactionsJson,
           ),
         );
       }
@@ -496,6 +506,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             readAny: true,
             views: m.views,
             edited: m.edited,
+            reactionsJson: m.reactionsJson, // <--- ДОБАВЛЕНО
             );
             DatabaseService.saveMessage(
               ChatMessage(
@@ -510,6 +521,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                 readAny: true,
                 views: m.views,
                 edited: m.edited,
+                reactionsJson: m.reactionsJson,
               ),
             );
           }
@@ -593,7 +605,6 @@ class _ChatListScreenState extends State<ChatListScreen>
 
 
   Future<void> _syncContactsIfNeeded() async {
-    // 1. ВСЕГДА читаем телефонную книгу для локального кэша имен
     final localPhones = await _getPhoneContacts();
 
     _localContacts.clear();
@@ -601,7 +612,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       _localContacts[p.phone] = (firstName: p.firstName, lastName: p.lastName);
     }
 
-    // 2. Раз в 24 часа — синхронизируем хэши с сервером
     final lastSync = await StorageService.getLastContactsSync();
     final now = DateTime.now().millisecondsSinceEpoch;
     const day = 24 * 60 * 60 * 1000;
@@ -614,13 +624,17 @@ class _ChatListScreenState extends State<ChatListScreen>
         await StorageService.saveLastContactsSync(now);
       } else {
         print('>>> [SYNC] Телефонная книга пуста, запрашиваем существующие контакты');
-        widget.wsService.sendCommand('/listusers contacts');
       }
     } else {
       print('>>> [SYNC] Синхронизация не требуется, запрашиваем существующие контакты');
-      widget.wsService.sendCommand('/listusers contacts');
     }
+
+    // Всегда запрашиваем актуальный список контактов и остальные данные
+    widget.wsService.sendCommand('/listusers contacts');
     widget.wsService.sendCommand('/listusers history');
+    widget.wsService.sendCommand('/listgroups');
+    widget.wsService.sendCommand('/channels');
+    widget.wsService.sendCommand('/onlineusers');
   }
 
   void _refreshChats() {
@@ -631,9 +645,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
 
 
-      widget.wsService.sendCommand('/listgroups');
-      widget.wsService.sendCommand('/channels');
-      widget.wsService.sendCommand('/onlineusers');
+
     } catch (e) {
       print('[ChatList] Ошибка при отправке команд: $e');
     }
@@ -735,6 +747,67 @@ class _ChatListScreenState extends State<ChatListScreen>
             context,
             MaterialPageRoute(builder: (_) => const LoginScreen()),
           );
+        return;
+      }
+
+      if (type == Protocol.MSG_TYPE_INVALIDATE_CACHE) {
+        print('>>> [UI] Получена команда инвалидации кэша (0x0C). Сбрасываем Hive и перезапрашиваем историю.');
+        DatabaseService.messagesBox.clear();
+        if (mounted) {
+          setState(() {
+            _messages.clear();
+            _contacts.clear();
+            _groups.clear();
+            _channels.clear();
+          });
+        }
+        _refreshChats();
+        return;
+      }
+
+      if (type == Protocol.MSG_TYPE_REACTION) {
+        final p = Protocol.parseReactionPacket(payload);
+
+        setState(() {
+          for (final entry in _messages.entries) {
+            final chatKey = entry.key;
+            final list = entry.value;
+            final idx = list.indexWhere((m) => m.id == p.msgId);
+            if (idx >= 0) {
+              final m = list[idx];
+              final Map<String, dynamic> reacts = jsonDecode(m.reactionsJson);
+              if (p.count == 0) {
+                reacts.remove(p.symbol);
+              } else {
+                reacts[p.symbol] = p.who.split(',');
+              }
+              final newJson = jsonEncode(reacts);
+              list[idx] = (
+              id: m.id, clientMsgId: m.clientMsgId, sender: m.sender, text: m.text,
+              isMe: m.isMe, timestamp: m.timestamp, replyToId: m.replyToId,
+              readMe: m.readMe, readAny: m.readAny, views: m.views, edited: m.edited, reactionsJson: newJson
+              );
+
+              DatabaseService.saveMessage(
+                  ChatMessage(
+                    id: m.id,
+                    sender: m.sender,
+                    recipient: _recipientFor(m, chatKey), // <--- ТЕПЕРЬ ИСПОЛЬЗУЕТСЯ chatKey ИЗ ЦИКЛА
+                    text: m.text,
+                    isMe: m.isMe,
+                    timestamp: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
+                    replyToId: m.replyToId,
+                    readMe: m.readMe,
+                    readAny: m.readAny,
+                    views: m.views,
+                    edited: m.edited,
+                    reactionsJson: newJson,
+                  )
+              );
+              break;
+            }
+          }
+        });
         return;
       }
 
@@ -1137,6 +1210,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                 readAny: m.readAny,
                 views: m.views,
                 edited: m.edited,
+                reactionsJson: m.reactionsJson,
                 );
               }
             }
@@ -1325,6 +1399,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       readAny: old.readAny,
       views: old.views,
       edited: true,
+      reactionsJson: old.reactionsJson, // <--- ДОБАВЛЕНО
       );
       list[idx] = updated;
       DatabaseService.saveMessage(
@@ -1340,6 +1415,7 @@ class _ChatListScreenState extends State<ChatListScreen>
           readAny: old.readAny,
           views: old.views,
           edited: true,
+          reactionsJson: old.reactionsJson,
         ),
       );
     });
@@ -2017,6 +2093,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       onSetReply: (msgId) => _setReplyTo(chatKey, msgId),
       onCancelReply: () => _cancelReply(chatKey),
       resolveReply: (replyToId) => _resolveReplyFor(chatKey, replyToId),
+      onReaction: (msgId, emoji) => widget.wsService.sendReaction(msgId, _kindForChat(chatKey), emoji),
     );
   }
 

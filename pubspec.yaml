@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.2.2+26
+version: 2.3.2+27
 
 environment:
   sdk: ^3.11.5
@@ -30,7 +30,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
+  emoji_picker_flutter: ^4.5.4
   x25519: ^0.1.1          # X25519 (синхронно, без проблем)
   pointycastle: ^4.0.0   # HKDF и AES (уже есть)
   crypto: ^3.0.3          # Для SHA-256 (не обязательно, но оставим)

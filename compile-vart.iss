@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "VartChat"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "2.2.2-1"
 #define MyAppPublisher "VartRusData"
 #define MyAppURL "https://vartrusdata.alwaysdata.net"
 #define MyAppExeName "vartchat.exe"

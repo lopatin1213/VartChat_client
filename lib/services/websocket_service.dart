@@ -271,6 +271,12 @@ class WebSocketService {
     _sendData(packet);
   }
 
+  Future<void> sendReaction(int msgId, int kind, String emoji) async {
+    if (_channel == null) throw Exception('Not connected');
+    final packet = Protocol.buildReactionPacket(msgId, kind, emoji);
+    _sendData(packet);
+  }
+
   Future<void> sendDeleteChat(int kind, String name, {int type = 0}) async {
     if (_channel == null) throw Exception('Not connected');
     final packet = Protocol.buildDeleteChatPacket(kind, name, type: type);
@@ -333,7 +339,6 @@ class WebSocketService {
     final plaintext = Uint8List.fromList(utf8.encode(cmd));
     final result = await CryptoService.encryptAesGcm(plaintext, _sessionKey!);
 
-    // [0x0A][nonce 12][enc_len 4][encrypted]
     final totalLen = 1 + 12 + 4 + result.ciphertext.length;
     final packet = Uint8List(totalLen);
     var offset = 0;
@@ -341,7 +346,6 @@ class WebSocketService {
     packet.setAll(offset, result.nonce);
     offset += 12;
 
-    // Пишем длину big-endian
     packet[offset] = (result.ciphertext.length >> 24) & 0xFF;
     packet[offset + 1] = (result.ciphertext.length >> 16) & 0xFF;
     packet[offset + 2] = (result.ciphertext.length >> 8) & 0xFF;

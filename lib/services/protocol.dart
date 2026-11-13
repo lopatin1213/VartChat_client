@@ -3,7 +3,7 @@ import 'dart:convert';
 
 class Protocol {
   static const int MIN_PROTO_VERSION = 3;
-  static const int CURRENT_PROTO_VERSION = 4;
+  static const int CURRENT_PROTO_VERSION = 5;
 
   static const int HANDSHAKE_OK = 0x00;
   static const int HANDSHAKE_REJECT = 0xFF;
@@ -17,7 +17,9 @@ class Protocol {
   static const int MSG_TYPE_READ = 0x07;
   static const int MSG_TYPE_EDIT = 0x08;
   static const int MSG_TYPE_TYPING = 0x09;
-  static const int MSG_TYPE_SECURE_COMMAND = 0x0A; // <--- НОВОЕ
+  static const int MSG_TYPE_SECURE_COMMAND = 0x0A;
+  static const int MSG_TYPE_REACTION = 0x0B;
+  static const int MSG_TYPE_INVALIDATE_CACHE = 0x0C;
 
   static const int LOGOUT_TYPE_EXIT = 0;
   static const int LOGOUT_TYPE_DELETE_ACCOUNT = 1;
@@ -148,6 +150,32 @@ class Protocol {
     _writeUint32(packet, offset, encrypted.length); offset += 4;
     packet.setAll(offset, encrypted);
     return packet;
+  }
+
+  static Uint8List buildReactionPacket(int msgId, int kind, String symbol) {
+    final symBytes = Uint8List.fromList(utf8.encode(symbol));
+    final totalLen = 1 + 8 + 1 + 4 + symBytes.length;
+    final packet = Uint8List(totalLen);
+    var offset = 0;
+    packet[offset++] = MSG_TYPE_REACTION;
+    ByteData.sublistView(packet, offset, offset + 8).setInt64(0, msgId, Endian.big); offset += 8;
+    packet[offset++] = kind;
+    _writeUint32(packet, offset, symBytes.length); offset += 4;
+    packet.setAll(offset, symBytes);
+    return packet;
+  }
+
+  static ({int msgId, int kind, String symbol, int count, String who}) parseReactionPacket(Uint8List payload) {
+    var offset = 0;
+    final msgId = ByteData.sublistView(payload, offset, offset + 8).getInt64(0, Endian.big); offset += 8;
+    final kind = payload[offset]; offset += 1;
+    final symLen = _readUint32(payload, offset); offset += 4;
+    final symbol = utf8.decode(payload.sublist(offset, offset + symLen), allowMalformed: true); offset += symLen;
+    final count = _readUint32(payload, offset); offset += 4;
+    final whoLen = _readUint32(payload, offset); offset += 4;
+    final who = utf8.decode(payload.sublist(offset, offset + whoLen), allowMalformed: true);
+
+    return (msgId: msgId, kind: kind, symbol: symbol, count: count, who: who);
   }
 
   static Uint8List buildDeleteChatPacket(int kind, String name, {int type = 0}) {

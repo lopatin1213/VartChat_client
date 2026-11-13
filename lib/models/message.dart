@@ -40,6 +40,9 @@ class ChatMessage extends HiveObject {
   @HiveField(11)
   bool edited;
 
+  @HiveField(12)
+  String reactionsJson;
+
   ChatMessage({
     required this.id,
     required this.sender,
@@ -53,5 +56,6 @@ class ChatMessage extends HiveObject {
     this.readAny = false,
     this.views,
     this.edited = false,
+    this.reactionsJson = '{}',
   });
 }

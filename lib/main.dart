@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'package:awesome_notifications/awesome_notifications.dart'; // Добавлен импорт
+import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -14,22 +14,34 @@ import 'services/notification_service.dart';
 import 'dart:io';
 
 void main() {
-  // Самый первый принт. Он должен появиться в консоли ДО всего остального.
-  print('>>> [MAIN] ТОЧКА ВХОДА. kDebugMode = $kDebugMode');
+  void startApp() {
+    print('>>> [MAIN] ТОЧКА ВХОДА. kDebugMode = $kDebugMode');
 
-  try {
-    _bootstrap().catchError((e, st) {
-      print('>>> [MAIN] ОШИБКА В _bootstrap: $e');
+    try {
+      _bootstrap().catchError((e, st) {
+        print('>>> [MAIN] ОШИБКА В _bootstrap: $e');
+        print('>>> [MAIN] Stacktrace: $st');
+        runApp(MaterialApp(
+          home: Scaffold(
+            body: Center(child: Text('Краш: $e', style: const TextStyle(color: Colors.red))),
+          ),
+        ));
+      });
+    } catch (e, st) {
+      print('>>> [MAIN] СИНХРОННАЯ ОШИБКА: $e');
       print('>>> [MAIN] Stacktrace: $st');
-      runApp(MaterialApp(
-        home: Scaffold(
-          body: Center(child: Text('Краш: $e', style: const TextStyle(color: Colors.red))),
-        ),
-      ));
-    });
-  } catch (e, st) {
-    print('>>> [MAIN] СИНХРОННАЯ ОШИБКА: $e');
-    print('>>> [MAIN] Stacktrace: $st');
+    }
+  }
+
+  if (!kDebugMode) {
+    runZoned(
+      startApp,
+      zoneSpecification: ZoneSpecification(
+        print: (_, __, ___, String line) {},
+      ),
+    );
+  } else {
+    startApp();
   }
 }
 
@@ -44,7 +56,7 @@ Future<void> _bootstrap() async {
     print('>>> [MAIN] 4. Notifications OK');
 
     print('>>> [MAIN] 5. Инициализируем FCM...');
-    await FcmService.init().timeout(const Duration(seconds: 3));
+    await FcmService.init();
     print('>>> [MAIN] 6. FCM OK');
 
     print('>>> [MAIN] 7. Проверяем initialAction...');
@@ -86,7 +98,7 @@ Future<void> _bootstrap() async {
 
     final prefs = await SharedPreferences.getInstance();
     const schemaKey = 'messages_schema_version';
-    const currentSchema = 5;
+    const currentSchema = 6;
     if ((prefs.getInt(schemaKey) ?? 1) < currentSchema) {
       await Hive.deleteBoxFromDisk('messages');
       await prefs.setInt(schemaKey, currentSchema);
@@ -109,7 +121,6 @@ Future<void> _bootstrap() async {
   } catch (e, st) {
     print('>>> [MAIN] КРИТИЧЕСКАЯ ОШИБКА: $e');
     print('>>> [MAIN] Stacktrace: $st');
-    // Показываем ошибку на экране, чтобы не было черного экрана
     runApp(MaterialApp(
       home: Scaffold(
         body: Center(

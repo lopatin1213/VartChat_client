@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_rustore_update/flutter_rustore_update.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -189,6 +191,14 @@ class _LoginScreenState extends State<LoginScreen> {
         if (hsErr != null) {
           await _wsService.disconnect();
           if (mounted) {
+            if (Platform.isAndroid) {
+              try {
+                await RustoreUpdateClient.immediate();
+                return;
+              } catch (e) {
+                print('[UI] RuStore immediate failed: $e');
+              }
+            }
             setState(() {
               _errorMessage = hsErr;
               _isLoading = false;
@@ -351,6 +361,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
         if (text.startsWith('Успех|') && !_authSuccess) {
           _authSuccess = true;
+          TextInput.finishAutofillContext();
           _wsService.markAuthenticated();
 
           final parts = text.split('|');
@@ -534,86 +545,95 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const SizedBox(height: 20),
-            Text('VartChat', style: Theme.of(context).textTheme.headlineLarge),
-            const SizedBox(height: 32),
-            if (_errorMessage != null) ...[
-              Text(_errorMessage!, style: const TextStyle(color: Colors.red), textAlign: TextAlign.center),
-              const SizedBox(height: 16),
-            ],
-            TextField(
-              controller: _phoneController,
-              decoration: const InputDecoration(labelText: 'Телефон'),
-              keyboardType: TextInputType.phone,
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _passwordController,
-              decoration: const InputDecoration(labelText: 'Пароль'),
-              obscureText: true,
-            ),
-            if (_isRegister) ...[
-              const SizedBox(height: 16),
+        child: AutofillGroup(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const SizedBox(height: 20),
+              Text('VartChat', style: Theme.of(context).textTheme.headlineLarge),
+              const SizedBox(height: 32),
+              if (_errorMessage != null) ...[
+                Text(_errorMessage!, style: const TextStyle(color: Colors.red), textAlign: TextAlign.center),
+                const SizedBox(height: 16),
+              ],
               TextField(
-                controller: _firstNameController,
-                decoration: const InputDecoration(labelText: 'Имя'),
+                controller: _phoneController,
+                decoration: const InputDecoration(labelText: 'Телефон'),
+                keyboardType: TextInputType.phone,
+                autofillHints: const [AutofillHints.telephoneNumber],
               ),
               const SizedBox(height: 16),
               TextField(
-                controller: _lastNameController,
-                decoration: const InputDecoration(labelText: 'Фамилия'),
+                controller: _passwordController,
+                decoration: const InputDecoration(labelText: 'Пароль'),
+                obscureText: true,
+                autofillHints: _isRegister
+                    ? const [AutofillHints.newPassword]
+                    : const [AutofillHints.password],
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _usernameController,
-                decoration: const InputDecoration(labelText: 'Username'),
-              ),
-            ],
-            const SizedBox(height: 24),
-            _buildAgreementCheckbox(),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: (!_isAgreed || _isLoading) ? null : _onLoginPressed,
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size(double.infinity, 50),
-              ),
-              child: _isLoading
-                  ? const CircularProgressIndicator()
-                  : Text(_isRegister ? 'Зарегистрироваться' : 'Войти'),
-            ),
-            TextButton(
-              onPressed: () => setState(() => _isRegister = !_isRegister),
-              child: Text(_isRegister ? 'Уже есть аккаунт?' : 'Нет аккаунта?'),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _wsService.isConnected ? Colors.green : Colors.red,
-                  ),
+              if (_isRegister) ...[
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _firstNameController,
+                  decoration: const InputDecoration(labelText: 'Имя'),
+                  autofillHints: const [AutofillHints.givenName],
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  _wsService.isConnected ? 'Подключено' : 'Не подключено',
-                  style: const TextStyle(fontSize: 12),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _lastNameController,
+                  decoration: const InputDecoration(labelText: 'Фамилия'),
+                  autofillHints: const [AutofillHints.familyName],
                 ),
-                const SizedBox(width: 16),
-                Text(
-                  'Сервер: $_serverAddress',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _usernameController,
+                  decoration: const InputDecoration(labelText: 'Username'),
+                  autofillHints: const [AutofillHints.username],
                 ),
               ],
-            ),
-            const SizedBox(height: 20),
-          ],
+              const SizedBox(height: 24),
+              _buildAgreementCheckbox(),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: (!_isAgreed || _isLoading) ? null : _onLoginPressed,
+                style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 50),
+                ),
+                child: _isLoading
+                    ? const CircularProgressIndicator()
+                    : Text(_isRegister ? 'Зарегистрироваться' : 'Войти'),
+              ),
+              TextButton(
+                onPressed: () => setState(() => _isRegister = !_isRegister),
+                child: Text(_isRegister ? 'Уже есть аккаунт?' : 'Нет аккаунта?'),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _wsService.isConnected ? Colors.green : Colors.red,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _wsService.isConnected ? 'Подключено' : 'Не подключено',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  const SizedBox(width: 16),
+                  Text(
+                    'Сервер: $_serverAddress',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
         ),
       ),
     );

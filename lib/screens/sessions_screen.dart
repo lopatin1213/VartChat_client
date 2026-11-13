@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
+import '../services/storage_service.dart';
+import '../services/database_service.dart';
+import 'login_screen.dart';
 
 class SessionsScreen extends StatefulWidget {
   final WebSocketService wsService;
@@ -35,6 +38,25 @@ class _SessionsScreenState extends State<SessionsScreen> {
   void _handleMessage(Uint8List data) {
     try {
       final parsed = Protocol.parsePacket(data);
+
+      if (parsed.type == Protocol.MSG_TYPE_LOGOUT) {
+        final reason = Protocol.parseLogoutFromServer(parsed.payload);
+        StorageService.clearAll();
+        DatabaseService.clearData();
+        widget.wsService.disconnect();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(reason), backgroundColor: Colors.red),
+          );
+          Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute(builder: (_) => const LoginScreen()),
+                (route) => false,
+          );
+        }
+        return;
+      }
+
       if (parsed.type == Protocol.MSG_TYPE_SYSTEM) {
         final text = Protocol.readString(parsed.payload, 0);
 
@@ -76,6 +98,26 @@ class _SessionsScreenState extends State<SessionsScreen> {
     widget.wsService.sendLogout(token, type: 2);
   }
 
+  IconData _getDeviceIcon(String device, bool isCurrent) {
+    final lower = device.toLowerCase();
+
+    if (isCurrent) {
+      if (lower.contains('windows') || lower.contains('linux') || lower.contains('macos')) {
+        return Icons.laptop_mac;
+      }
+      return Icons.smartphone;
+    }
+
+    if (lower.contains('windows') || lower.contains('linux') || lower.contains('macos')) {
+      return Icons.computer;
+    }
+    if (lower.contains('android') || lower.contains('iphone') || lower.contains('ios')) {
+      return Icons.phone_android;
+    }
+
+    return Icons.devices;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -92,7 +134,7 @@ class _SessionsScreenState extends State<SessionsScreen> {
           final timeStr = DateFormat('dd.MM.yyyy HH:mm').format(dt);
 
           return ListTile(
-            leading: Icon(s.isCurrent ? Icons.phone_android : Icons.devices),
+            leading: Icon(_getDeviceIcon(s.device, s.isCurrent)),
             title: Text(
               s.device,
               style: TextStyle(fontWeight: s.isCurrent ? FontWeight.bold : FontWeight.normal),

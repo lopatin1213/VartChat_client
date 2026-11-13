@@ -31,6 +31,7 @@ dependencies:
   flutter:
     sdk: flutter
   emoji_picker_flutter: ^4.5.4
+  flutter_rustore_update: ^10.5.4
   x25519: ^0.1.1          # X25519 (синхронно, без проблем)
   pointycastle: ^4.0.0   # HKDF и AES (уже есть)
   crypto: ^3.0.3          # Для SHA-256 (не обязательно, но оставим)

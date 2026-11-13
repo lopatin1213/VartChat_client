@@ -152,6 +152,13 @@ class MyApp extends StatelessWidget {
         brightness: Brightness.dark,
         colorSchemeSeed: Colors.deepPurple,
       ),
+      builder: (context, child) {
+        return SafeArea(
+          top: false,
+          bottom: true,
+          child: child!,
+        );
+      },
       home: const SplashScreen(),
     );
   }

@@ -837,7 +837,7 @@ class ChatScreenState extends State<ChatScreen> {
       GestureDetector(
         onTap: () {
           Navigator.pop(context);
-          _showCustomEmojiPicker(msgId, position); // ПЕРЕДАЕМ ПОЗИЦИЮ
+          _showCustomEmojiPicker(msgId, position);
         },
         child: const Padding(
           padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
@@ -967,7 +967,7 @@ class ChatScreenState extends State<ChatScreen> {
   void _showCustomEmojiPicker(int msgId, RelativeRect position) {
     showDialog(
       context: context,
-      barrierColor: Colors.transparent, // Без темной подложки
+      barrierColor: Colors.transparent,
       builder: (ctx) {
         final size = MediaQuery.of(ctx).size;
 
@@ -977,7 +977,6 @@ class ChatScreenState extends State<ChatScreen> {
         const pickerWidth = 320.0;
         const pickerHeight = 350.0;
 
-        // Ограничиваем позицию, чтобы окно не улетело за экран
         if (left + pickerWidth > size.width) {
           left = size.width - pickerWidth - 16;
         }
@@ -2201,7 +2200,7 @@ class ChatScreenState extends State<ChatScreen> {
     }
 
     final inputPadding = EdgeInsets.only(
-      bottom: widget.isWide ? 8 : 58,
+      bottom: widget.isWide ? 8 : 8,
       left: 8,
       right: 8,
       top: 8,

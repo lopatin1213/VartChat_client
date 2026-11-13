@@ -46,6 +46,11 @@ public final class GeneratedPluginRegistrant {
       Log.e(TAG, "Error registering plugin flutter_contacts, co.quis.flutter_contacts.FlutterContactsPlugin", e);
     }
     try {
+      flutterEngine.getPlugins().add(new ru.rustore.flutter_rustore_update.FlutterRustoreUpdatePlugin());
+    } catch (Exception e) {
+      Log.e(TAG, "Error registering plugin flutter_rustore_update, ru.rustore.flutter_rustore_update.FlutterRustoreUpdatePlugin", e);
+    }
+    try {
       flutterEngine.getPlugins().add(new com.it_nomads.fluttersecurestorage.FlutterSecureStoragePlugin());
     } catch (Exception e) {
       Log.e(TAG, "Error registering plugin flutter_secure_storage, com.it_nomads.fluttersecurestorage.FlutterSecureStoragePlugin", e);

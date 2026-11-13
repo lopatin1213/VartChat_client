@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_rustore_update/flutter_rustore_update.dart';
 import '../services/websocket_service.dart';
 import '../services/fcm_service.dart';
 import '../services/protocol.dart';
@@ -52,7 +54,15 @@ class _SplashScreenState extends State<SplashScreen> {
       final hsErr = await wsService.performHandshake();
 
       if (hsErr != null) {
-        _goToLogin();
+        if (Platform.isAndroid) {
+          try {
+            await RustoreUpdateClient.immediate();
+            return;
+          } catch (e) {
+            print('>>> [SPLASH] RuStore immediate failed: $e');
+          }
+        }
+        _showVersionDialog(hsErr);
         return;
       }
     } catch (e) {
@@ -87,11 +97,28 @@ class _SplashScreenState extends State<SplashScreen> {
       _goToChatList(wsService, username);
     } catch (e) {
       print('>>> [SPLASH] Ошибка авторизации: $e');
-      // Если мы дошли сюда, значит сеть вроде была, но токен не прошел или таймаут.
-      // В любом случае пускаем в ChatListScreen, где произойдет реконнект
-      // и корректная обработка протухшего токена (logout -> login).
       _goToChatList(wsService, username);
     }
+  }
+
+  void _showVersionDialog(String reason) {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('Несовместимая версия'),
+        content: Text('Сервер сообщил: $reason\n\nОбновите приложение, чтобы продолжить.'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+            },
+            child: const Text('Понятно'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _goToChatList(WebSocketService wsService, String username) {
@@ -122,13 +149,11 @@ class _SplashScreenState extends State<SplashScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // ЗАМЕНИТЕ ПУТЬ НА ВАШ ЛОГОТИП, ЕСЛИ ОН ДРУГОЙ
             Image.asset(
               'assets/icon/icon.png',
               width: 120,
               height: 120,
               errorBuilder: (context, error, stackTrace) {
-                // Если картинка не найдена, показываем стандартную иконку, чтобы приложение не упало
                 return const Icon(Icons.chat_bubble, size: 120, color: Colors.blue);
               },
             ),

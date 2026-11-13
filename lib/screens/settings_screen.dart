@@ -4,7 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/websocket_service.dart';
 import 'user_profile_screen.dart';
 import 'privacy_settings_screen.dart';
-import 'sessions_screen.dart';
+import 'security_screen.dart'; // <--- ИЗМЕНЕН ИМПОРТ
 import 'change_password_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -87,13 +87,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ListTile(
             leading: const Icon(Icons.security),
             title: const Text('Безопасность'),
-            subtitle: const Text('Активные сессии'),
+            subtitle: const Text('Сессии и удаление аккаунта'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => SessionsScreen(wsService: widget.wsService),
+                  builder: (_) => SecurityScreen(wsService: widget.wsService), // <--- ИЗМЕНЕН ПЕРЕХОД
                 ),
               );
             },

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_rustore_update/flutter_rustore_update.dart';
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
@@ -210,6 +211,8 @@ class _ChatListScreenState extends State<ChatListScreen>
 
     _checkPendingReply();
 
+    _checkForRuStoreUpdates();
+
     _periodicTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
       if (!widget.wsService.isConnected) {
         _scheduleReconnect();
@@ -221,6 +224,33 @@ class _ChatListScreenState extends State<ChatListScreen>
         setState(() => _isConnecting = false);
       }
     });
+  }
+
+  Future<void> _checkForRuStoreUpdates() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final info = await RustoreUpdateClient.info();
+      if (info.updateAvailabilityValue == UpdateAvailability.available) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Доступно обновление VartChat'),
+            action: SnackBarAction(
+              label: 'Обновить',
+              onPressed: () async {
+                try {
+                  await RustoreUpdateClient.download();
+                } catch (e) {
+                  print('>>> [RuStore] download error: $e');
+                }
+              },
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      print('>>> [RuStore] info error: $e');
+    }
   }
 
   Future<void> _checkPendingReply() async {
@@ -506,7 +536,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             readAny: true,
             views: m.views,
             edited: m.edited,
-            reactionsJson: m.reactionsJson, // <--- ДОБАВЛЕНО
+            reactionsJson: m.reactionsJson,
             );
             DatabaseService.saveMessage(
               ChatMessage(
@@ -585,7 +615,6 @@ class _ChatListScreenState extends State<ChatListScreen>
 
       final res = <({String phone, String firstName, String lastName})>[];
       for (final contact in contacts) {
-        // ИСПРАВЛЕНИЕ: contact.name может быть null, используем ?.
         final fName = contact.name?.first ?? '';
         final lName = contact.name?.last ?? '';
         for (final phone in contact.phones) {
@@ -629,7 +658,6 @@ class _ChatListScreenState extends State<ChatListScreen>
       print('>>> [SYNC] Синхронизация не требуется, запрашиваем существующие контакты');
     }
 
-    // Всегда запрашиваем актуальный список контактов и остальные данные
     widget.wsService.sendCommand('/listusers contacts');
     widget.wsService.sendCommand('/listusers history');
     widget.wsService.sendCommand('/listgroups');
@@ -640,12 +668,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   void _refreshChats() {
     try {
       _syncContactsIfNeeded();
-
-      // ВАЖНО: Запрашиваем историю, чтобы не потерять тех, кого нет в контактах
-
-
-
-
     } catch (e) {
       print('[ChatList] Ошибка при отправке команд: $e');
     }
@@ -790,18 +812,10 @@ class _ChatListScreenState extends State<ChatListScreen>
 
               DatabaseService.saveMessage(
                   ChatMessage(
-                    id: m.id,
-                    sender: m.sender,
-                    recipient: _recipientFor(m, chatKey), // <--- ТЕПЕРЬ ИСПОЛЬЗУЕТСЯ chatKey ИЗ ЦИКЛА
-                    text: m.text,
-                    isMe: m.isMe,
-                    timestamp: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
-                    replyToId: m.replyToId,
-                    readMe: m.readMe,
-                    readAny: m.readAny,
-                    views: m.views,
-                    edited: m.edited,
-                    reactionsJson: newJson,
+                    id: m.id, sender: m.sender, recipient: _recipientFor(m, chatKey),
+                    text: m.text, isMe: m.isMe, timestamp: DateTime.fromMillisecondsSinceEpoch(m.timestamp),
+                    replyToId: m.replyToId, readMe: m.readMe, readAny: m.readAny, views: m.views,
+                    edited: m.edited, reactionsJson: newJson,
                   )
               );
               break;
@@ -956,12 +970,10 @@ class _ChatListScreenState extends State<ChatListScreen>
                       : username;
                   final lastSeen = parts.length > 3 ? int.tryParse(parts[3].trim()) : null;
 
-                  // Ищем имя в локальной телефонной книге
                   final localInfo = _localContacts[phone];
                   final localFirst = localInfo?.firstName ?? '';
                   final localLast = localInfo?.lastName ?? '';
 
-                  // Если в телефонной книге есть имя или фамилия, используем их
                   final finalDisplayName = (localFirst.isNotEmpty || localLast.isNotEmpty)
                       ? '$localFirst $localLast'.trim()
                       : serverDisplayName;
@@ -1399,7 +1411,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       readAny: old.readAny,
       views: old.views,
       edited: true,
-      reactionsJson: old.reactionsJson, // <--- ДОБАВЛЕНО
+      reactionsJson: old.reactionsJson,
       );
       list[idx] = updated;
       DatabaseService.saveMessage(
@@ -1808,7 +1820,6 @@ class _ChatListScreenState extends State<ChatListScreen>
           itemCount: _contacts.length,
           itemBuilder: (context, index) {
             final contact = _contacts[index];
-            // Приоритет: локальное имя -> display_name сервера -> username
             final titleText = contact.displayName.isNotEmpty
                 ? contact.displayName
                 : contact.username;
@@ -1944,7 +1955,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                 ? _displayNameFor(chatKey)
                 : chatKey.replaceFirst(RegExp(r'^[#&]'), '');
             final IconData icon = (chatKey == widget.username)
-            ? Icons.bookmark_outlined :
+                ? Icons.bookmark_outlined :
             isGroup
                 ? Icons.group
                 : (isChannel ? Icons.campaign : isSystem ? Icons.verified_user_rounded :Icons.person);
@@ -2202,17 +2213,6 @@ class _ChatListScreenState extends State<ChatListScreen>
             onTap: () {
               Navigator.pop(context);
               _logout();
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.delete_forever, color: Colors.red),
-            title: const Text(
-              'Удалить аккаунт',
-              style: TextStyle(color: Colors.red),
-            ),
-            onTap: () {
-              Navigator.pop(context);
-              _showDeleteAccountDialog();
             },
           ),
         ],

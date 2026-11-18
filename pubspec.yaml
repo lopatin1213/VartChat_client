@@ -67,6 +67,10 @@ dependencies:
   flutter_contacts: ^2.6.0
   permission_handler: ^11.3.0
 
+  # Локальный форк appflowy_editor 6.2.0 с таблицами (путь к папке форка)
+  appflowy_editor:
+    path: C:\MyProjects\appflowy_editor_fork
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

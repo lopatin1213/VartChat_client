@@ -3,12 +3,12 @@
 ; Non-commercial use only
 
 #define MyAppName "VartChat"
-#define MyAppVersion "2.2.2-1"
+#define MyAppVersion "2.4.3"
 #define MyAppPublisher "VartRusData"
 #define MyAppURL "https://vartrusdata.alwaysdata.net"
 #define MyAppExeName "vartchat.exe"
 
-#define NeedBuild 1
+#define NeedBuild 0
 #define FlutterProjectDir "C:\Users\builder\AndroidStudioProjects\vartchat"
 
 [Preprocessor]
@@ -58,15 +58,20 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\awesome_notifications_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\dartjni.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\emoji_picker_flutter_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\firebase_core_plugin.lib"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\flutter_secure_storage_windows_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\flutter_windows.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\permission_handler_windows_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\share_plus_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\url_launcher_windows_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\vartchat.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\vartchat.exp"; DestDir: "{app}"; Flags: ignoreversion
 Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\vartchat.lib"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\url_launcher_windows_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\data\*"; DestDir: "{app}/data"; Flags: ignoreversion recursesubdirs createallsubdirs
-; NOTE: Don't use "Flags: ignoreversion" on any shared system files
+Source: "C:\Users\builder\AndroidStudioProjects\vartchat\build\windows\x64\runner\Release\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

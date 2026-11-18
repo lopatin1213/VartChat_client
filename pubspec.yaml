@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.3.2+27
+version: 2.4.3+29
 
 environment:
   sdk: ^3.11.5
@@ -32,6 +32,8 @@ dependencies:
     sdk: flutter
   emoji_picker_flutter: ^4.5.4
   flutter_rustore_update: ^10.5.4
+  flutter_quill: ^11.6.0
+  quill_delta_markdown: ^0.1.1
   x25519: ^0.1.1          # X25519 (синхронно, без проблем)
   pointycastle: ^4.0.0   # HKDF и AES (уже есть)
   crypto: ^3.0.3          # Для SHA-256 (не обязательно, но оставим)
@@ -68,8 +70,6 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  hive_generator: ^2.0.1
-  build_runner: ^2.4.9
   flutter_launcher_icons: ^0.14.4
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

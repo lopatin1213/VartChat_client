@@ -3,6 +3,7 @@
 *.log
 *.pyc
 *.swp
+multitool-desktop*.exe
 .DS_Store
 .atom/
 .build/

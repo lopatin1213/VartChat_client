@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:characters/characters.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ai_chat_markdown/flutter_ai_chat_markdown.dart';
@@ -10,6 +11,7 @@ import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import '../services/websocket_service.dart';
 import '../services/protocol.dart';
 import 'user_profile_screen.dart';
+import 'expanded_editor_screen.dart';
 
 typedef ChatMsg = ({
 int id,
@@ -162,7 +164,7 @@ class ChatScreenState extends State<ChatScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final fn = widget.focusNode;
-      if (fn != null && fn.canRequestFocus && fn.hasFocus) {
+      if (fn != null && fn.canRequestFocus) {
         Timer(const Duration(milliseconds: 50), () {
           fn.requestFocus();
         });
@@ -195,12 +197,18 @@ class ChatScreenState extends State<ChatScreen> {
       _editingMsgId = null;
       _savedDraft = null;
       _showEmojiPicker = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        widget.focusNode?.requestFocus();
+      });
     }
     _handleNewMessages();
   }
 
   @override
   void dispose() {
+    widget.controller.removeListener(_onTextChanged);
+    widget.focusNode?.removeListener(_handleFocusChange);
+
     if (_editingMsgId != null) {
       final draft = _savedDraft ?? '';
       widget.controller.text = draft;
@@ -208,8 +216,7 @@ class ChatScreenState extends State<ChatScreen> {
         offset: draft.length,
       );
     }
-    widget.controller.removeListener(_onTextChanged);
-    widget.focusNode?.removeListener(_handleFocusChange);
+
     _presenceTimer?.cancel();
     widget.scrollController?.removeListener(_onScrollListener);
     _msgKeys.clear();
@@ -217,6 +224,9 @@ class ChatScreenState extends State<ChatScreen> {
   }
 
   void _onTextChanged() {
+    if (!mounted) return;
+    setState(() {});
+
     if (_editingMsgId != null) return;
     if (widget.controller.text.trim().isEmpty) return;
 
@@ -233,6 +243,77 @@ class ChatScreenState extends State<ChatScreen> {
     if (kind != Protocol.MSG_KIND_CHANNEL) {
       widget.wsService.sendTyping(kind, widget.chatName);
     }
+  }
+
+  void _openExpandedEditor() {
+    widget.focusNode?.unfocus();
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ExpandedEditorScreen(
+          controller: widget.controller,
+          onSendMessage: (text) {
+            // ИСПРАВЛЕНО: Проверяем, редактируем ли мы сообщение
+            if (_editingMsgId != null) {
+              widget.onEditMessage?.call(_editingMsgId!, text);
+              _cancelEdit();
+            } else {
+              widget.onSendMessage(text);
+            }
+          },
+        ),
+      ),
+    ).then((_) {
+      if (mounted) {
+        setState(() {});
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && widget.focusNode != null) {
+            FocusScope.of(context).requestFocus(widget.focusNode);
+          }
+        });
+      }
+    });
+  }
+
+  void _insertEmoji(String emoji) {
+    final text = widget.controller.text;
+    final sel = widget.controller.selection;
+    if (!sel.isValid) {
+      widget.controller.text = text + emoji;
+      widget.controller.selection = TextSelection.collapsed(offset: widget.controller.text.length);
+      return;
+    }
+    final before = text.substring(0, sel.start);
+    final after = text.substring(sel.end);
+    final newText = before + emoji + after;
+    widget.controller.text = newText;
+    widget.controller.selection = TextSelection.collapsed(offset: before.length + emoji.length);
+  }
+
+  void _onEmojiBackspace() {
+    final text = widget.controller.text;
+    final sel = widget.controller.selection;
+    if (!sel.isValid) return;
+
+    if (sel.start == 0 && sel.end == 0) return;
+
+    if (sel.start != sel.end) {
+      final before = text.substring(0, sel.start);
+      final after = text.substring(sel.end);
+      widget.controller.text = before + after;
+      widget.controller.selection = TextSelection.collapsed(offset: before.length);
+      return;
+    }
+
+    final before = text.substring(0, sel.start);
+    final after = text.substring(sel.end);
+
+    final chars = before.characters;
+    if (chars.isEmpty) return;
+
+    final newBefore = chars.skipLast(1).toString();
+    widget.controller.text = newBefore + after;
+    widget.controller.selection = TextSelection.collapsed(offset: newBefore.length);
   }
 
   void _onScrollListener() {
@@ -550,6 +631,66 @@ class ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _showInsertTableDialog() {
+    final countCtrl = TextEditingController(text: '2');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Количество колонок'),
+        content: TextField(
+          controller: countCtrl,
+          keyboardType: TextInputType.number,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Например: 3'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Отмена'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final count = int.tryParse(countCtrl.text);
+              if (count != null && count > 0 && count <= 10) {
+                Navigator.pop(ctx);
+                _insertTable(count);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Введите число от 1 до 10')),
+                );
+              }
+            },
+            child: const Text('Вставить'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _insertTable(int columns) {
+    final headers = List.generate(columns, (i) => 'Заголовок ${i + 1}');
+    final separators = List.generate(columns, (i) => '---');
+    final cells = List.generate(columns, (i) => 'Текст');
+
+    final headerRow = '| ${headers.join(' | ')} |';
+    final separatorRow = '| ${separators.join(' | ')} |';
+    final cellRow = '| ${cells.join(' | ')} |';
+
+    final table = '\n$headerRow\n$separatorRow\n$cellRow\n';
+
+    final text = widget.controller.text;
+    final sel = widget.controller.selection;
+    if (sel.isValid) {
+      final before = text.substring(0, sel.start);
+      final after = text.substring(sel.end);
+      widget.controller.text = before + table + after;
+      widget.controller.selection = TextSelection.collapsed(offset: before.length + table.length);
+    } else {
+      widget.controller.text = text + table;
+      widget.controller.selection = TextSelection.collapsed(offset: widget.controller.text.length);
+    }
+  }
+
   Widget _buildFormattingToolbar() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -596,6 +737,11 @@ class ChatScreenState extends State<ChatScreen> {
               Icons.format_list_numbered,
               'Нумерованный список',
                   () => _insertLinePrefix('1. '),
+            ),
+            _toolbarButton(
+              Icons.table_chart,
+              'Таблица',
+              _showInsertTableDialog,
             ),
           ],
         ),
@@ -1793,53 +1939,91 @@ class ChatScreenState extends State<ChatScreen> {
 
   Widget _buildInputField(EdgeInsets padding) {
     final isEditing = _editingMsgId != null;
+
+    final text = widget.controller.text;
+    final byteSize = utf8.encode(text).length;
+    const maxSize = 64 * 1024;
+    final isOverLimit = byteSize > maxSize;
+    final sizeStr = (byteSize / 1024).toStringAsFixed(1);
+
+    final lineCount = text.isEmpty ? 0 : '\n'.allMatches(text).length + 1;
+    final showExpandButton = lineCount > 10;
+
     return Padding(
       padding: padding,
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          IconButton(
-            icon: Icon(_showEmojiPicker ? Icons.keyboard : Icons.emoji_emotions_outlined),
-            onPressed: () {
-              setState(() {
-                _showEmojiPicker = !_showEmojiPicker;
-              });
-              if (_showEmojiPicker) {
-                widget.focusNode?.unfocus();
-              } else {
-                widget.focusNode?.requestFocus();
-              }
-            },
-          ),
-          Expanded(
-            child: CallbackShortcuts(
-              bindings: {
-                const SingleActivator(LogicalKeyboardKey.enter): () {
-                  _sendMessage();
+          Row(
+            children: [
+              IconButton(
+                icon: Icon(_showEmojiPicker ? Icons.keyboard : Icons.emoji_emotions_outlined),
+                onPressed: () {
+                  setState(() {
+                    _showEmojiPicker = !_showEmojiPicker;
+                  });
+                  if (_showEmojiPicker) {
+                    widget.focusNode?.unfocus();
+                  } else {
+                    widget.focusNode?.requestFocus();
+                  }
                 },
-                const SingleActivator(LogicalKeyboardKey.numpadEnter): () {
-                  _sendMessage();
-                },
-              },
-              child: TextField(
-                controller: widget.controller,
-                focusNode: widget.focusNode,
-                decoration: InputDecoration(
-                  hintText: isEditing ? 'Редактирование...' : 'Сообщение...',
-                  border: const OutlineInputBorder(),
+              ),
+              Expanded(
+                child: CallbackShortcuts(
+                  bindings: {
+                    const SingleActivator(LogicalKeyboardKey.enter): () {
+                      _sendMessage();
+                    },
+                    const SingleActivator(LogicalKeyboardKey.numpadEnter): () {
+                      _sendMessage();
+                    },
+                  },
+                  child: TextField(
+                    controller: widget.controller,
+                    focusNode: widget.focusNode,
+                    onTap: () {
+                      widget.focusNode?.requestFocus();
+                    },
+                    decoration: InputDecoration(
+                      hintText: isEditing ? 'Редактирование...' : 'Сообщение...',
+                      border: const OutlineInputBorder(),
+                      errorText: isOverLimit ? 'Превышен лимит в 64 КБ' : null,
+                    ),
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    textCapitalization: TextCapitalization.sentences,
+                    minLines: 1,
+                    maxLines: 5,
+                  ),
                 ),
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                textCapitalization: TextCapitalization.sentences,
-                minLines: 1,
-                maxLines: 5,
+              ),
+              if (showExpandButton) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  icon: const Icon(Icons.open_in_full),
+                  tooltip: 'Развернуть',
+                  onPressed: _openExpandedEditor,
+                ),
+              ],
+              const SizedBox(width: 4),
+              IconButton(
+                icon: Icon(isEditing ? Icons.check : Icons.send),
+                tooltip: isEditing ? 'Сохранить' : 'Отправить',
+                onPressed: isOverLimit ? null : _sendMessage,
+                color: isOverLimit ? Colors.grey : null,
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 12, top: 4),
+            child: Text(
+              'Размер: $sizeStr КБ / 64 КБ',
+              style: TextStyle(
+                fontSize: 10,
+                color: isOverLimit ? Colors.red : Colors.grey,
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            icon: Icon(isEditing ? Icons.check : Icons.send),
-            tooltip: isEditing ? 'Сохранить' : 'Отправить',
-            onPressed: _sendMessage,
           ),
         ],
       ),
@@ -1962,8 +2146,9 @@ class ChatScreenState extends State<ChatScreen> {
               height: 250,
               child: EmojiPicker(
                 onEmojiSelected: (category, emoji) {
-                  widget.controller.text += emoji.emoji;
+                  _insertEmoji(emoji.emoji);
                 },
+                onBackspacePressed: _onEmojiBackspace,
               ),
             ),
         ],
@@ -1982,8 +2167,9 @@ class ChatScreenState extends State<ChatScreen> {
                 height: 250,
                 child: EmojiPicker(
                   onEmojiSelected: (category, emoji) {
-                    widget.controller.text += emoji.emoji;
+                    _insertEmoji(emoji.emoji);
                   },
+                  onBackspacePressed: _onEmojiBackspace,
                 ),
               ),
           ],
@@ -2262,6 +2448,16 @@ class ChatScreenState extends State<ChatScreen> {
     final text = widget.controller.text.trim();
     if (text.isEmpty) return;
 
+    if (utf8.encode(text).length > 64 * 1024) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Сообщение слишком длинное. Максимум 64 КБ.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     if (_editingMsgId != null) {
       final id = _editingMsgId!;
       widget.onEditMessage?.call(id, text);
@@ -2271,6 +2467,9 @@ class ChatScreenState extends State<ChatScreen> {
 
     widget.onSendMessage(text);
     widget.controller.clear();
+
+    widget.focusNode?.requestFocus();
+
     _scrollToTop();
   }
 

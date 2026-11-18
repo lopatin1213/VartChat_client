@@ -793,6 +793,10 @@ class _ChatListScreenState extends State<ChatListScreen>
         setState(() {
           for (final entry in _messages.entries) {
             final chatKey = entry.key;
+            // Обновляем только тот чат, тип которого совпадает с kind из пакета,
+            // иначе при коллизии id (личка/группа/канал имеют свои счётчики)
+            // реакция может попасть в неправильный чат.
+            if (_kindForChat(chatKey) != p.kind) continue;
             final list = entry.value;
             final idx = list.indexWhere((m) => m.id == p.msgId);
             if (idx >= 0) {
@@ -1703,26 +1707,32 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   void _initSharingListener() async {
-    final initialMedia = await ReceiveSharingIntent.instance.getInitialMedia();
-    if (initialMedia.isNotEmpty) {
-      final text = initialMedia.map((m) => m.path ?? '').join('\n');
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _handleSharedText(text);
-      });
-      ReceiveSharingIntent.instance.reset();
-    }
-
-    _sharingSub = ReceiveSharingIntent.instance.getMediaStream().listen(
-          (List<SharedMediaFile> value) {
-        if (value.isNotEmpty) {
-          final text = value.map((m) => m.path ?? '').join('\n');
+    try {
+      final initialMedia = await ReceiveSharingIntent.instance.getInitialMedia();
+      if (initialMedia.isNotEmpty) {
+        final text = initialMedia.map((m) => m.path ?? '').join('\n');
+        WidgetsBinding.instance.addPostFrameCallback((_) {
           _handleSharedText(text);
-        }
-      },
-      onError: (err) {
-        print('[SHARE] Ошибка: $err');
-      },
-    );
+        });
+        ReceiveSharingIntent.instance.reset();
+      }
+
+      _sharingSub = ReceiveSharingIntent.instance.getMediaStream().listen(
+            (List<SharedMediaFile> value) {
+          if (value.isNotEmpty) {
+            final text = value.map((m) => m.path ?? '').join('\n');
+            _handleSharedText(text);
+          }
+        },
+        onError: (err) {
+          print('[SHARE] Ошибка: $err');
+        },
+      );
+    } catch (e) {
+      // receive_sharing_intent не реализован на всех платформах (например, Windows).
+      // Игнорируем, чтобы не сыпать исключениями при старте.
+      print('[SHARE] SharingListener не доступен на этой платформе: $e');
+    }
   }
 
   void _handleSharedText(String text) {
